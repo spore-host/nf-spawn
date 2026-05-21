@@ -1,0 +1,45 @@
+plugins {
+    id 'groovy'
+}
+
+group = 'io.nextflow'
+version = '0.1.0'
+
+repositories {
+    mavenCentral()
+    maven { url 'https://s01.oss.sonatype.org/content/repositories/snapshots/' }
+}
+
+configurations {
+    compileOnly
+    testImplementation.extendsFrom compileOnly
+}
+
+dependencies {
+    compileOnly 'io.nextflow:nextflow:23.10.0'
+    compileOnly 'org.pf4j:pf4j:3.9.0'
+    compileOnly 'org.slf4j:slf4j-api:2.0.6'
+    testImplementation 'org.spockframework:spock-core:2.3-groovy-3.0'
+    testImplementation 'junit:junit:4.13.2'
+}
+
+sourceSets {
+    main {
+        groovy { srcDirs = ['src/main/groovy'] }
+        resources { srcDirs = ['src/main/resources'] }
+    }
+}
+
+compileGroovy {
+    classpath = configurations.compileOnly + configurations.runtimeClasspath
+}
+
+jar {
+    manifest {
+        attributes 'Plugin-Id': 'nf-spawn',
+                   'Plugin-Version': version,
+                   'Plugin-Class': 'io.nextflow.spawn.SpawnPlugin',
+                   'Plugin-Provider': 'scttfrdmn'
+    }
+    from sourceSets.main.output
+}
