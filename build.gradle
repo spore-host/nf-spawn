@@ -1,3 +1,5 @@
+import org.apache.tools.ant.filters.ReplaceTokens
+
 plugins {
     id 'groovy'
 }
@@ -28,6 +30,14 @@ sourceSets {
     main {
         groovy { srcDirs = ['src/main/groovy'] }
         resources { srcDirs = ['src/main/resources'] }
+    }
+}
+
+// Replace the @version@ token in META-INF/nextflow.plugins with the build
+// version so the plugin manifest can't drift from build.gradle (#7).
+processResources {
+    filesMatching('META-INF/nextflow.plugins') {
+        filter(ReplaceTokens, tokens: [version: project.version.toString()])
     }
 }
 
