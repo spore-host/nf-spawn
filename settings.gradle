@@ -1,1 +1,6 @@
+plugins {
+    // Auto-download the JDK 21 toolchain the nextflow-plugin build requires.
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
 rootProject.name = 'nf-spawn'

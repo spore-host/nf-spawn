@@ -1,5 +1,0 @@
-id=nf-spawn
-version=@version@
-provider=scttfrdmn
-className=io.nextflow.spawn.SpawnPlugin
-requires=23.10.0

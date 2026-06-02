@@ -108,8 +108,10 @@ class SpawnTaskHandler extends TaskHandler {
         return status == TaskStatus.COMPLETED
     }
 
+    // Nextflow 26.x: the abstract hook is protected killTask() — the public
+    // kill() on the base now delegates to it (#9).
     @Override
-    void kill() {
+    protected void killTask() {
         log.info "Terminating spawn instance '${instanceName}' for task '${task.name}'"
         try {
             new ProcessBuilder(['spawn', 'cancel', instanceName])

@@ -24,7 +24,7 @@ Pipeline process → SpawnTaskHandler.submit()
 
 - [spawn](https://github.com/spore-host/spawn) CLI installed and on `PATH`
 - AWS credentials configured (`~/.aws/credentials`, environment variables, or EC2 instance metadata)
-- Nextflow 23.10.0+
+- Nextflow 26.04.x (the version this plugin is built against — see [Build & toolchain](#build--toolchain))
 
 ## Installation
 
@@ -32,14 +32,13 @@ Add to `nextflow.config`:
 
 ```groovy
 plugins {
-    id 'nf-spawn@0.1.0'
+    id 'nf-spawn@0.2.0'
 }
 ```
 
 Or install locally during development:
 ```bash
-./gradlew jar
-cp build/libs/nf-spawn-0.1.0.jar ~/.nextflow/plugins/nf-spawn-0.1.0/
+./gradlew installPlugin   # builds and unpacks into ~/.nextflow/plugins/nf-spawn-<version>/
 ```
 
 ## Configuration
@@ -47,7 +46,7 @@ cp build/libs/nf-spawn-0.1.0.jar ~/.nextflow/plugins/nf-spawn-0.1.0/
 ```groovy
 // nextflow.config
 plugins {
-    id 'nf-spawn@0.1.0'
+    id 'nf-spawn@0.2.0'
 }
 
 process {
@@ -103,11 +102,29 @@ workflow {
 }
 ```
 
-## Building
+## Build & toolchain
+
+nf-spawn is built with the official **[`io.nextflow.nextflow-plugin`](https://github.com/nextflow-io/nextflow-plugin-gradle)** Gradle toolchain, and **tracks a specific Nextflow release**. The target version is declared once in `build.gradle`:
+
+```groovy
+nextflowPlugin {
+    nextflowVersion = '26.04.3'   // the Nextflow API this plugin is built and tested against
+    className       = 'io.nextflow.spawn.SpawnPlugin'
+    extensionPoints = ['io.nextflow.spawn.SpawnExecutor']
+}
+```
+
+That single `nextflowVersion` is the source of truth for the Nextflow API the plugin compiles against. The toolchain resolves the Nextflow API (including 26.x, which Maven Central doesn't carry) from the Seqera Maven repository, and **generates** the plugin manifest (`Plugin-Requires`, `Plugin-Class`, …) and `META-INF/extensions.idx` from this block — so the build can't drift from the Nextflow version it targets. To follow a new Nextflow release, bump `nextflowVersion` and rebuild; do not hand-edit manifests.
+
+Commands:
 
 ```bash
-./gradlew jar
+./gradlew assemble        # build the plugin zip (build/distributions/nf-spawn-<version>.zip)
+./gradlew installPlugin   # build + install into ~/.nextflow/plugins for local testing
+./gradlew test            # run tests
 ```
+
+Requires a JDK (the Gradle toolchain auto-provisions JDK 21 for compilation; sources target Java 17).
 
 ## Related
 
