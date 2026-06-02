@@ -11,7 +11,8 @@ repositories {
 }
 
 configurations {
-    compileOnly
+    // compileOnly is provided by the `groovy`/`java` plugin (non-resolvable by
+    // design). Don't redefine it — just let test code see the compileOnly deps.
     testImplementation.extendsFrom compileOnly
 }
 
@@ -28,10 +29,6 @@ sourceSets {
         groovy { srcDirs = ['src/main/groovy'] }
         resources { srcDirs = ['src/main/resources'] }
     }
-}
-
-compileGroovy {
-    classpath = configurations.compileOnly + configurations.runtimeClasspath
 }
 
 jar {
