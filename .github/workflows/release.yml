@@ -43,14 +43,10 @@ jobs:
       - name: Build jar
         run: ./gradlew jar --no-daemon
 
+      # Use the action rather than the gh CLI — the self-hosted runner container
+      # has no gh installed.
       - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          ver="${GITHUB_REF_NAME#v}"
-          gh release create "${GITHUB_REF_NAME}" \
-            "build/libs/nf-spawn-${ver}.jar" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/libs/nf-spawn-*.jar
+          generate_release_notes: true
