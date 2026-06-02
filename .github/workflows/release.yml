@@ -41,7 +41,7 @@ jobs:
           fi
 
       - name: Build jar
-        run: gradle jar --no-daemon
+        run: ./gradlew jar --no-daemon
 
       - name: Publish release
         env:
