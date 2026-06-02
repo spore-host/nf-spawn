@@ -8,10 +8,16 @@ import nextflow.processor.TaskMonitor
 import nextflow.processor.TaskPollingMonitor
 import nextflow.processor.TaskRun
 import nextflow.util.Duration
+import org.pf4j.Extension
 import org.pf4j.ExtensionPoint
 
+// @Extension marks this as a pf4j extension so Nextflow's ExecutorFactory
+// discovers it. The annotation alone isn't reliable under Groovy (the pf4j
+// annotation processor doesn't run), so it's also listed explicitly in
+// META-INF/extensions.idx — the convention Nextflow core plugins follow (#7).
 @Slf4j
 @CompileStatic
+@Extension
 class SpawnExecutor extends Executor implements ExtensionPoint {
 
     @Override
