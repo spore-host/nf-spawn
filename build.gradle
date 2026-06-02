@@ -1,58 +1,26 @@
-import org.apache.tools.ant.filters.ReplaceTokens
-
 plugins {
-    id 'groovy'
+    // Official Nextflow plugin toolchain. It resolves the Nextflow API (incl.
+    // 26.x, which Maven Central doesn't carry) from the Seqera Maven repo,
+    // provides pf4j/slf4j/test deps, and generates the plugin manifest +
+    // META-INF/extensions.idx — so the build can't drift from the Nextflow API
+    // it targets (the recurring cause of #3 / #7 / #9).
+    id 'io.nextflow.nextflow-plugin' version '1.0.0-beta.14'
 }
 
 group = 'io.nextflow'
-version = '0.1.3'
+version = '0.2.0'
 
-repositories {
-    mavenCentral()
-    maven { url 'https://s01.oss.sonatype.org/content/repositories/snapshots/' }
-}
+nextflowPlugin {
+    // The Nextflow version this plugin is built against and tracks. Bump this
+    // (not a hand-edited manifest) to follow Nextflow releases.
+    nextflowVersion = '26.04.3'
+    provider        = 'scttfrdmn'
+    className       = 'io.nextflow.spawn.SpawnPlugin'
+    description     = 'Nextflow executor plugin that runs tasks on ephemeral EC2 instances via spore-host/spawn'
 
-configurations {
-    // compileOnly is provided by the `groovy`/`java` plugin (non-resolvable by
-    // design). Don't redefine it — just let test code see the compileOnly deps.
-    testImplementation.extendsFrom compileOnly
-}
-
-dependencies {
-    compileOnly 'io.nextflow:nextflow:23.10.0'
-    compileOnly 'org.pf4j:pf4j:3.9.0'
-    compileOnly 'org.slf4j:slf4j-api:2.0.6'
-    testImplementation 'org.spockframework:spock-core:2.3-groovy-3.0'
-    testImplementation 'junit:junit:4.13.2'
-}
-
-sourceSets {
-    main {
-        groovy { srcDirs = ['src/main/groovy'] }
-        resources { srcDirs = ['src/main/resources'] }
-    }
-}
-
-// Replace the @version@ token in META-INF/nextflow.plugins with the build
-// version so the plugin manifest can't drift from build.gradle (#7).
-//
-// Declare the version as a task input: the filtered value isn't part of any
-// input *file*, so without this Gradle considers the task up-to-date after a
-// version bump and ships a stale manifest until `clean`. With the input
-// registered, changing the version re-runs the task incrementally.
-processResources {
-    inputs.property('pluginVersion', project.version)
-    filesMatching('META-INF/nextflow.plugins') {
-        filter(ReplaceTokens, tokens: [version: project.version.toString()])
-    }
-}
-
-jar {
-    manifest {
-        attributes 'Plugin-Id': 'nf-spawn',
-                   'Plugin-Version': version,
-                   'Plugin-Class': 'io.nextflow.spawn.SpawnPlugin',
-                   'Plugin-Provider': 'scttfrdmn'
-    }
-    from sourceSets.main.output
+    // Generates META-INF/extensions.idx so Nextflow's ExecutorFactory discovers
+    // the executor (replaces the hand-maintained file from #7).
+    extensionPoints = [
+        'io.nextflow.spawn.SpawnExecutor'
+    ]
 }
