@@ -35,7 +35,13 @@ sourceSets {
 
 // Replace the @version@ token in META-INF/nextflow.plugins with the build
 // version so the plugin manifest can't drift from build.gradle (#7).
+//
+// Declare the version as a task input: the filtered value isn't part of any
+// input *file*, so without this Gradle considers the task up-to-date after a
+// version bump and ships a stale manifest until `clean`. With the input
+// registered, changing the version re-runs the task incrementally.
 processResources {
+    inputs.property('pluginVersion', project.version)
     filesMatching('META-INF/nextflow.plugins') {
         filter(ReplaceTokens, tokens: [version: project.version.toString()])
     }
