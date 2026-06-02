@@ -29,11 +29,15 @@ class SpawnTaskHandler extends TaskHandler {
         // Derive a short, valid instance name from the task hash
         instanceName = "nf-${task.hash.toString().take(12)}"
 
-        // Get configuration from task ext properties
-        String instanceType = task.config.ext?.instanceType ?: 't3.medium'
-        String region       = task.config.ext?.region       ?: 'us-east-1'
-        String ttl          = task.config.ext?.ttl          ?: '2h'
-        boolean spot        = task.config.ext?.spot         ? true : false
+        // Get configuration from task ext properties. TaskConfig.ext is an
+        // untyped map, so under @CompileStatic we access it via a Map cast +
+        // subscript rather than dotted property access (which fails static
+        // type checking — see #3).
+        Map ext = (task.config.ext ?: [:]) as Map
+        String instanceType = (ext.instanceType ?: 't3.medium') as String
+        String region       = (ext.region       ?: 'us-east-1') as String
+        String ttl          = (ext.ttl          ?: '2h') as String
+        boolean spot        = ext.spot ? true : false
 
         log.info "Submitting task '${task.name}' to spawn instance '${instanceName}' (${instanceType} in ${region})"
 
