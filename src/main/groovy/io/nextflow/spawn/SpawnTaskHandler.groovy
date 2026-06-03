@@ -39,6 +39,7 @@ class SpawnTaskHandler extends TaskHandler {
         String ttl          = (ext.ttl          ?: '2h') as String
         boolean spot        = ext.spot ? true : false
         String ami          = (ext.ami ?: '') as String
+        int volumeSize      = (ext.volumeSize ?: 0) as int
 
         log.info "Submitting task '${task.name}' to spawn instance '${instanceName}' (${instanceType} in ${region})"
 
@@ -55,7 +56,7 @@ class SpawnTaskHandler extends TaskHandler {
         scriptFile.toFile().setExecutable(true)
 
         // Build the spawn launch command
-        List<String> cmd = buildLaunchCommand(instanceName, instanceType, region, ttl, spot, scriptFile.toString(), ami)
+        List<String> cmd = buildLaunchCommand(instanceName, instanceType, region, ttl, spot, scriptFile.toString(), ami, volumeSize)
 
         log.debug "spawn launch command: ${cmd.join(' ')}"
 
@@ -137,10 +138,15 @@ class SpawnTaskHandler extends TaskHandler {
     // --ami is passed only when ext.ami is set. Otherwise spawn auto-detects the
     // AMI via ssm:GetParameter, which requires the instance/caller role to hold
     // that SSM permission (spawn#38); an explicit AMI avoids that dependency.
+    //
+    // --volume-size is passed only when ext.volumeSize > 0. spawn#25 already
+    // floors the root volume at the AMI snapshot minimum automatically, so this
+    // is NOT needed just to fit a large baked AMI — it's for requesting EXTRA
+    // working space beyond that minimum. spawn keeps the larger of the two.
     @groovy.transform.PackageScope
     static List<String> buildLaunchCommand(String instanceName, String instanceType,
                                            String region, String ttl, boolean spot,
-                                           String scriptPath, String ami) {
+                                           String scriptPath, String ami, int volumeSize) {
         List<String> cmd = [
             'spawn', 'launch', instanceName,
             '--instance-type', instanceType,
@@ -154,6 +160,9 @@ class SpawnTaskHandler extends TaskHandler {
         ]
         if (ami) {
             cmd.addAll(['--ami', ami])
+        }
+        if (volumeSize > 0) {
+            cmd.addAll(['--volume-size', volumeSize.toString()])
         }
         if (spot) {
             cmd << '--spot'
