@@ -34,4 +34,42 @@ class SpawnTaskHandlerTest extends Specification {
         true  | true
         false | false
     }
+
+    def 'staging script syncs the S3 work dir down, runs the task, and syncs results back (#14)'() {
+        given:
+        def workDir = 's3://my-bucket/work/ab/cdef0123456789'
+
+        when:
+        def script = SpawnTaskHandler.buildStagingScript(workDir, 'us-west-2', 'echo hello > out.txt')
+
+        then: 'inputs are staged down from the S3 work dir before the task runs'
+        def downIdx = script.indexOf('aws s3 sync "${WORKDIR_S3}" "${LOCAL_DIR}/"')
+        downIdx >= 0
+
+        and: 'the task script is materialized and run, capturing the real exit code'
+        script.contains('echo hello > out.txt')
+        script.contains('bash .command.sh 1>.command.out 2>.command.err')
+        script.contains('echo $? > .exitcode')
+
+        and: 'outputs sync back up (excluding .exitcode), then .exitcode is uploaded last'
+        def upOutputsIdx = script.indexOf('aws s3 sync "${LOCAL_DIR}/" "${WORKDIR_S3}" --region "${AWS_REGION}" --exclude ".exitcode"')
+        def upExitIdx    = script.indexOf('aws s3 cp .exitcode')
+        upOutputsIdx >= 0
+        upExitIdx > upOutputsIdx
+
+        and: 'ordering: stage-down precedes run precedes stage-up'
+        downIdx < script.indexOf('bash .command.sh')
+        script.indexOf('echo $? > .exitcode') < upOutputsIdx
+
+        and: 'the work dir URI and region are injected, single-quoted'
+        script.contains("WORKDIR_S3='s3://my-bucket/work/ab/cdef0123456789'")
+        script.contains("AWS_REGION='us-west-2'")
+    }
+
+    def 'staging script single-quotes values and escapes embedded quotes'() {
+        expect:
+        SpawnTaskHandler.shellQuote("plain") == "'plain'"
+        SpawnTaskHandler.shellQuote("a'b")   == "'a'\\''b'"
+        SpawnTaskHandler.shellQuote(null)    == "''"
+    }
 }
