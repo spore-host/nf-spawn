@@ -7,7 +7,7 @@ class SpawnTaskHandlerTest extends Specification {
     def 'passes the task script via --user-data-file, not a bare --user-data path (#13)'() {
         when:
         def cmd = SpawnTaskHandler.buildLaunchCommand(
-            'nf-abc123', 't3.medium', 'us-east-1', '2h', false, '/tmp/nf-spawn-abc.sh')
+            'nf-abc123', 't3.medium', 'us-east-1', '2h', false, '/tmp/nf-spawn-abc.sh', '')
 
         then:
         // The script path must be carried by --user-data-file so spawn reads
@@ -22,17 +22,35 @@ class SpawnTaskHandlerTest extends Specification {
         and: 'launch does not block on running/ssh'
         cmd.contains('--wait-for-running=false')
         cmd.contains('--wait-for-ssh=false')
+
+        and: 'auto-approves so a non-TTY pipe invocation never blocks on a prompt (#18)'
+        cmd.contains('-y')
     }
 
     def 'adds --spot only when requested'() {
         expect:
-        SpawnTaskHandler.buildLaunchCommand('n', 't3.medium', 'us-east-1', '2h', spot, '/s.sh')
+        SpawnTaskHandler.buildLaunchCommand('n', 't3.medium', 'us-east-1', '2h', spot, '/s.sh', '')
             .contains('--spot') == expected
 
         where:
         spot  | expected
         true  | true
         false | false
+    }
+
+    def 'passes --ami only when ext.ami is set, to avoid SSM auto-detect (#18 / spawn#38)'() {
+        when:
+        def withAmi = SpawnTaskHandler.buildLaunchCommand(
+            'n', 't3.medium', 'us-east-1', '2h', false, '/s.sh', 'ami-0123456789abcdef0')
+        def withoutAmi = SpawnTaskHandler.buildLaunchCommand(
+            'n', 't3.medium', 'us-east-1', '2h', false, '/s.sh', '')
+
+        then: 'an explicit AMI is forwarded as --ami <id>'
+        withAmi.contains('--ami')
+        withAmi[withAmi.indexOf('--ami') + 1] == 'ami-0123456789abcdef0'
+
+        and: 'no --ami when unset, so spawn keeps its own auto-detect behavior'
+        !withoutAmi.contains('--ami')
     }
 
     def 'staging script syncs the S3 work dir down, runs the task, and syncs results back (#14)'() {
