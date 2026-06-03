@@ -82,7 +82,8 @@ class SpawnTaskHandlerTest extends Specification {
         and: 'the task script is materialized and run, capturing the real exit code'
         script.contains('echo hello > out.txt')
         script.contains('bash .command.sh 1>.command.out 2>.command.err')
-        script.contains('echo $? > .exitcode')
+        script.contains('TASK_RC=$?')
+        script.contains('echo "${TASK_RC}" > .exitcode')
 
         and: 'outputs sync back up (excluding .exitcode), then .exitcode is uploaded last'
         def upOutputsIdx = script.indexOf('aws s3 sync "${LOCAL_DIR}/" "${WORKDIR_S3}" --region "${AWS_REGION}" --exclude ".exitcode"')
@@ -92,11 +93,28 @@ class SpawnTaskHandlerTest extends Specification {
 
         and: 'ordering: stage-down precedes run precedes stage-up'
         downIdx < script.indexOf('bash .command.sh')
-        script.indexOf('echo $? > .exitcode') < upOutputsIdx
+        script.indexOf('echo "${TASK_RC}" > .exitcode') < upOutputsIdx
 
         and: 'the work dir URI and region are injected, single-quoted'
         script.contains("WORKDIR_S3='s3://my-bucket/work/ab/cdef0123456789'")
         script.contains("AWS_REGION='us-west-2'")
+    }
+
+    def 'completion is signaled only after the task, reflecting its real exit code (#24)'() {
+        when:
+        def script = SpawnTaskHandler.buildStagingScript(
+            's3://b/work/aa/bb', 'us-east-1', 'run_task')
+
+        then: 'status is derived from the task exit code, not hard-coded success'
+        script.contains('if [ "${TASK_RC}" -eq 0 ]; then COMPLETE_STATUS=success; else COMPLETE_STATUS=failed; fi')
+        script.contains('spored complete --status "${COMPLETE_STATUS}"')
+
+        and: 'the unconditional success signal must not reappear (the #24 bug)'
+        !script.contains('spored complete --status success')
+
+        and: 'completion is the LAST step — strictly after the task runs and outputs sync'
+        script.indexOf('spored complete') > script.indexOf('bash .command.sh')
+        script.indexOf('spored complete') > script.indexOf('aws s3 cp .exitcode')
     }
 
     def 'staging script single-quotes values and escapes embedded quotes'() {
