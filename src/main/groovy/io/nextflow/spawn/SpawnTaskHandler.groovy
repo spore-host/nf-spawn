@@ -205,15 +205,23 @@ class SpawnTaskHandler extends TaskHandler {
         sb << '\nNF_SPAWN_TASK_EOF\n'
         sb << 'chmod +x .command.sh\n'
         sb << 'bash .command.sh 1>.command.out 2>.command.err\n'
-        sb << 'echo $? > .exitcode\n\n'
+        sb << 'TASK_RC=$?\n'
+        sb << 'echo "${TASK_RC}" > .exitcode\n\n'
 
         // 3. Sync outputs back FIRST (exclude .exitcode), then upload .exitcode
         //    alone so its appearance always trails the outputs.
         sb << 'aws s3 sync "${LOCAL_DIR}/" "${WORKDIR_S3}" --region "${AWS_REGION}" --exclude ".exitcode" --quiet\n'
         sb << 'aws s3 cp .exitcode "${WORKDIR_S3%/}/.exitcode" --region "${AWS_REGION}" --quiet\n\n'
 
-        // Best-effort completion signal for `spawn status --check-complete`.
-        sb << 'spored complete --status success 2>/dev/null || touch /tmp/SPAWN_COMPLETE\n'
+        // Completion signal for `spawn status --check-complete`, as the genuine
+        // LAST step and reflecting the REAL task outcome (#24). Earlier this ran
+        // `spored complete --status success` unconditionally, so a completion
+        // was signaled even if the task failed or hadn't meaningfully run —
+        // tasks looked complete (and successful) right after boot. Now the
+        // status is success/failed per ${TASK_RC}, so --check-complete returns
+        // 0 only on a genuinely successful task and 1 on failure.
+        sb << 'if [ "${TASK_RC}" -eq 0 ]; then COMPLETE_STATUS=success; else COMPLETE_STATUS=failed; fi\n'
+        sb << 'spored complete --status "${COMPLETE_STATUS}" 2>/dev/null || touch /tmp/SPAWN_COMPLETE\n'
 
         return sb.toString()
     }
