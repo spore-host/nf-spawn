@@ -47,19 +47,7 @@ class SpawnTaskHandler extends TaskHandler {
         scriptFile.toFile().setExecutable(true)
 
         // Build the spawn launch command
-        List<String> cmd = [
-            'spawn', 'launch', instanceName,
-            '--instance-type', instanceType,
-            '--region', region,
-            '--ttl', ttl,
-            '--on-complete', 'terminate',
-            '--user-data', scriptFile.toString(),
-            '--wait-for-running=false',
-            '--wait-for-ssh=false',
-        ]
-        if (spot) {
-            cmd << '--spot'
-        }
+        List<String> cmd = buildLaunchCommand(instanceName, instanceType, region, ttl, spot, scriptFile.toString())
 
         log.debug "spawn launch command: ${cmd.join(' ')}"
 
@@ -124,6 +112,31 @@ class SpawnTaskHandler extends TaskHandler {
     }
 
     // --- private helpers ---
+
+    // buildLaunchCommand assembles the `spawn launch` argv. The task script is
+    // passed via --user-data-file (which reads the file's contents) rather than
+    // --user-data, whose value is treated as INLINE user-data unless it begins
+    // with '@'. Passing a bare path to --user-data baked the path string itself
+    // into user-data, so the task script never executed on the instance (#13).
+    @groovy.transform.PackageScope
+    static List<String> buildLaunchCommand(String instanceName, String instanceType,
+                                           String region, String ttl, boolean spot,
+                                           String scriptPath) {
+        List<String> cmd = [
+            'spawn', 'launch', instanceName,
+            '--instance-type', instanceType,
+            '--region', region,
+            '--ttl', ttl,
+            '--on-complete', 'terminate',
+            '--user-data-file', scriptPath,
+            '--wait-for-running=false',
+            '--wait-for-ssh=false',
+        ]
+        if (spot) {
+            cmd << '--spot'
+        }
+        return cmd
+    }
 
     private String buildTaskScript() {
         // Build a shell script that runs the Nextflow task script and signals completion
