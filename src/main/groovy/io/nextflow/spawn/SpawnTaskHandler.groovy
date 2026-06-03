@@ -38,6 +38,7 @@ class SpawnTaskHandler extends TaskHandler {
         String region       = (ext.region       ?: 'us-east-1') as String
         String ttl          = (ext.ttl          ?: '2h') as String
         boolean spot        = ext.spot ? true : false
+        String ami          = (ext.ami ?: '') as String
 
         log.info "Submitting task '${task.name}' to spawn instance '${instanceName}' (${instanceType} in ${region})"
 
@@ -54,7 +55,7 @@ class SpawnTaskHandler extends TaskHandler {
         scriptFile.toFile().setExecutable(true)
 
         // Build the spawn launch command
-        List<String> cmd = buildLaunchCommand(instanceName, instanceType, region, ttl, spot, scriptFile.toString())
+        List<String> cmd = buildLaunchCommand(instanceName, instanceType, region, ttl, spot, scriptFile.toString(), ami)
 
         log.debug "spawn launch command: ${cmd.join(' ')}"
 
@@ -120,15 +121,26 @@ class SpawnTaskHandler extends TaskHandler {
 
     // --- private helpers ---
 
-    // buildLaunchCommand assembles the `spawn launch` argv. The task script is
-    // passed via --user-data-file (which reads the file's contents) rather than
-    // --user-data, whose value is treated as INLINE user-data unless it begins
-    // with '@'. Passing a bare path to --user-data baked the path string itself
-    // into user-data, so the task script never executed on the instance (#13).
+    // buildLaunchCommand assembles the `spawn launch` argv.
+    //
+    // The task script is passed via --user-data-file (which reads the file's
+    // contents) rather than --user-data, whose value is treated as INLINE
+    // user-data unless it begins with '@'. Passing a bare path to --user-data
+    // baked the path string itself into user-data, so the task script never
+    // executed on the instance (#13).
+    //
+    // -y auto-approves the cost estimate. spawn only reads stdin for approval
+    // on a TTY, so this is a no-op for the current pipe invocation, but it
+    // guards against any future code path that would otherwise block waiting on
+    // a confirmation we can never answer from a ProcessBuilder (#18).
+    //
+    // --ami is passed only when ext.ami is set. Otherwise spawn auto-detects the
+    // AMI via ssm:GetParameter, which requires the instance/caller role to hold
+    // that SSM permission (spawn#38); an explicit AMI avoids that dependency.
     @groovy.transform.PackageScope
     static List<String> buildLaunchCommand(String instanceName, String instanceType,
                                            String region, String ttl, boolean spot,
-                                           String scriptPath) {
+                                           String scriptPath, String ami) {
         List<String> cmd = [
             'spawn', 'launch', instanceName,
             '--instance-type', instanceType,
@@ -138,7 +150,11 @@ class SpawnTaskHandler extends TaskHandler {
             '--user-data-file', scriptPath,
             '--wait-for-running=false',
             '--wait-for-ssh=false',
+            '-y',
         ]
+        if (ami) {
+            cmd.addAll(['--ami', ami])
+        }
         if (spot) {
             cmd << '--spot'
         }
