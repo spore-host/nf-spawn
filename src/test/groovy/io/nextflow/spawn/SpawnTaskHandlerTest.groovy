@@ -7,7 +7,7 @@ class SpawnTaskHandlerTest extends Specification {
     def 'passes the task script via --user-data-file, not a bare --user-data path (#13)'() {
         when:
         def cmd = SpawnTaskHandler.buildLaunchCommand(
-            'nf-abc123', 't3.medium', 'us-east-1', '2h', false, '/tmp/nf-spawn-abc.sh', '')
+            'nf-abc123', 't3.medium', 'us-east-1', '2h', false, '/tmp/nf-spawn-abc.sh', '', 0)
 
         then:
         // The script path must be carried by --user-data-file so spawn reads
@@ -29,7 +29,7 @@ class SpawnTaskHandlerTest extends Specification {
 
     def 'adds --spot only when requested'() {
         expect:
-        SpawnTaskHandler.buildLaunchCommand('n', 't3.medium', 'us-east-1', '2h', spot, '/s.sh', '')
+        SpawnTaskHandler.buildLaunchCommand('n', 't3.medium', 'us-east-1', '2h', spot, '/s.sh', '', 0)
             .contains('--spot') == expected
 
         where:
@@ -41,9 +41,9 @@ class SpawnTaskHandlerTest extends Specification {
     def 'passes --ami only when ext.ami is set, to avoid SSM auto-detect (#18 / spawn#38)'() {
         when:
         def withAmi = SpawnTaskHandler.buildLaunchCommand(
-            'n', 't3.medium', 'us-east-1', '2h', false, '/s.sh', 'ami-0123456789abcdef0')
+            'n', 't3.medium', 'us-east-1', '2h', false, '/s.sh', 'ami-0123456789abcdef0', 0)
         def withoutAmi = SpawnTaskHandler.buildLaunchCommand(
-            'n', 't3.medium', 'us-east-1', '2h', false, '/s.sh', '')
+            'n', 't3.medium', 'us-east-1', '2h', false, '/s.sh', '', 0)
 
         then: 'an explicit AMI is forwarded as --ami <id>'
         withAmi.contains('--ami')
@@ -51,6 +51,21 @@ class SpawnTaskHandlerTest extends Specification {
 
         and: 'no --ami when unset, so spawn keeps its own auto-detect behavior'
         !withoutAmi.contains('--ami')
+    }
+
+    def 'passes --volume-size only when ext.volumeSize > 0 (#21)'() {
+        when:
+        def withSize = SpawnTaskHandler.buildLaunchCommand(
+            'n', 't3.medium', 'us-east-1', '2h', false, '/s.sh', '', 100)
+        def withoutSize = SpawnTaskHandler.buildLaunchCommand(
+            'n', 't3.medium', 'us-east-1', '2h', false, '/s.sh', '', 0)
+
+        then: 'an explicit volume size is forwarded as --volume-size <gib>'
+        withSize.contains('--volume-size')
+        withSize[withSize.indexOf('--volume-size') + 1] == '100'
+
+        and: 'no --volume-size when unset, so spawn auto-floors at the AMI minimum (spawn#25)'
+        !withoutSize.contains('--volume-size')
     }
 
     def 'staging script syncs the S3 work dir down, runs the task, and syncs results back (#14)'() {
