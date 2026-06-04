@@ -98,6 +98,10 @@ class SpawnTaskHandlerTest extends Specification {
         and: 'the work dir URI and region are injected, single-quoted'
         script.contains("WORKDIR_S3='s3://my-bucket/work/ab/cdef0123456789'")
         script.contains("AWS_REGION='us-west-2'")
+
+        and: 'LOCAL_DIR is on the EBS root volume, not the /tmp tmpfs RAM disk (#27)'
+        script.contains('LOCAL_DIR=/var/lib/nf-work')
+        !script.contains('LOCAL_DIR=/tmp')
     }
 
     def 'completion is signaled only after the task, reflecting its real exit code (#24)'() {
