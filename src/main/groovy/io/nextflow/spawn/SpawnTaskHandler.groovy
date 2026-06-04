@@ -192,8 +192,11 @@ class SpawnTaskHandler extends TaskHandler {
         sb << 'set -uo pipefail\n\n'
         sb << "WORKDIR_S3=${shellQuote(workDirUri)}\n"
         sb << "AWS_REGION=${shellQuote(region)}\n"
-        sb << 'LOCAL_DIR=/tmp/nf-work\n\n'
-        sb << 'mkdir -p "${LOCAL_DIR}"\n'
+        // Stage on the EBS root volume, NOT /tmp. On AL2023 /tmp is a tmpfs
+        // (RAM-backed, ~1-2 GB), so large inputs (e.g. multi-GB SRA files) fail
+        // with "No space left on device" long before the 80 GB root fills (#27).
+        sb << 'LOCAL_DIR=/var/lib/nf-work\n\n'
+        sb << 'sudo mkdir -p "${LOCAL_DIR}" && sudo chown "$(id -u):$(id -g)" "${LOCAL_DIR}"\n'
 
         // 1. Stage inputs down from the S3 work dir.
         sb << 'aws s3 sync "${WORKDIR_S3}" "${LOCAL_DIR}/" --region "${AWS_REGION}" --quiet\n'
