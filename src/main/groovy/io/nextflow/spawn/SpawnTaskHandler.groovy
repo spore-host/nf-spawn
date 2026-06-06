@@ -73,36 +73,56 @@ class SpawnTaskHandler extends TaskHandler {
         }
 
         log.debug "spawn launch output for '${instanceName}':\n${output}"
-        status = TaskStatus.RUNNING
+        // Leave status SUBMITTED. Nextflow's TaskPollingMonitor drives the
+        // SUBMITTED→RUNNING transition via checkIfRunning(); pre-setting RUNNING
+        // here bypasses notifyTaskStart(), so the task is never counted as
+        // running and the monitor's barrier exits after dumpInterval with
+        // runningCount=0 (#31).
+        status = TaskStatus.SUBMITTED
     }
 
+    // checkIfRunning answers "has the task started running?" — the first time it
+    // returns true, the monitor records the start (notifyTaskStart) and counts
+    // the task RUNNING. It must NOT drive completion (that's checkIfCompleted);
+    // driving completion here is what skipped the running accounting (#31).
     @Override
     boolean checkIfRunning() {
-        if (status != TaskStatus.RUNNING) return false
+        if (status != TaskStatus.SUBMITTED) {
+            return status == TaskStatus.RUNNING
+        }
+        // --check-complete exits 2 (running), 0/1 (done), 3 (not yet reachable).
+        // Any of 0/1/2 means the instance is up and the task is underway →
+        // transition to RUNNING. 3 means spored/SSH isn't ready yet — stay SUBMITTED.
+        int rc = spawnCheckComplete()
+        if (rc == 3) {
+            return false
+        }
+        status = TaskStatus.RUNNING
+        return true
+    }
 
+    // checkIfCompleted is polled while the task is RUNNING, for the full task
+    // duration. It returns true only when the workload has actually finished.
+    @Override
+    boolean checkIfCompleted() {
+        if (status != TaskStatus.RUNNING) {
+            return status == TaskStatus.COMPLETED
+        }
         int rc = spawnCheckComplete()
         switch (rc) {
-            case 2:  // still running
-                return true
             case 0:  // completed successfully
                 log.info "Task '${task.name}' completed on instance '${instanceName}'"
                 task.exitStatus = 0
                 status = TaskStatus.COMPLETED
-                return false
+                return true
             case 1:  // failed or cancelled
                 log.warn "Task '${task.name}' failed on instance '${instanceName}'"
                 task.exitStatus = 1
                 status = TaskStatus.COMPLETED
-                return false
-            default:  // error querying status — keep polling
-                log.debug "spawn status query error (exit $rc) for '${instanceName}', will retry"
                 return true
+            default:  // 2 = still running, 3 = transient query error — keep polling
+                return false
         }
-    }
-
-    @Override
-    boolean checkIfCompleted() {
-        return status == TaskStatus.COMPLETED
     }
 
     // Nextflow 26.x: the abstract hook is protected killTask() — the public
