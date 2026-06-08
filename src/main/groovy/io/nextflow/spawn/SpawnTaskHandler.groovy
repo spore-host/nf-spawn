@@ -18,6 +18,10 @@ class SpawnTaskHandler extends TaskHandler {
     private final SpawnExecutor executor
     private String instanceName
     private Process launchProcess
+    // Captured at submit() so completion can be detected from the durable S3
+    // work dir (.exitcode) even after the instance has terminated (#34).
+    private String workDirUri
+    private String region
 
     SpawnTaskHandler(TaskRun task, SpawnExecutor executor) {
         super(task)
@@ -35,7 +39,8 @@ class SpawnTaskHandler extends TaskHandler {
         // type checking — see #3).
         Map ext = (task.config.ext ?: [:]) as Map
         String instanceType = (ext.instanceType ?: 't3.medium') as String
-        String region       = (ext.region       ?: 'us-east-1') as String
+        this.region         = (ext.region       ?: 'us-east-1') as String
+        String region       = this.region
         String ttl          = (ext.ttl          ?: '2h') as String
         boolean spot        = ext.spot ? true : false
         String ami          = (ext.ami ?: '') as String
@@ -48,7 +53,8 @@ class SpawnTaskHandler extends TaskHandler {
         // executor it is an S3 URI (e.g. s3://bucket/work/ab/cdef...); the
         // staging script syncs it to the instance, runs the task there, and
         // syncs results back so Nextflow can finalize the task (#14).
-        String workDirUri = task.workDirStr
+        this.workDirUri = task.workDirStr
+        String workDirUri = this.workDirUri
 
         // Write the staging script to a temp file shipped as instance user-data.
         Path scriptFile = Files.createTempFile("nf-spawn-${instanceName}-", ".sh")
@@ -90,6 +96,15 @@ class SpawnTaskHandler extends TaskHandler {
         if (status != TaskStatus.SUBMITTED) {
             return status == TaskStatus.RUNNING
         }
+        // Fast-finishing tasks may produce .exitcode (and terminate the
+        // instance) before we ever observe RUNNING. If the durable signal is
+        // already present, promote to RUNNING so the next checkIfCompleted()
+        // tick finalizes it — otherwise checkIfRunning would SSH a dead box and
+        // get rc=3 forever, stranding the task in SUBMITTED (#34).
+        if (readExitCodeFromS3() != null) {
+            status = TaskStatus.RUNNING
+            return true
+        }
         // --check-complete exits 2 (running), 0/1 (done), 3 (not yet reachable).
         // Any of 0/1/2 means the instance is up and the task is underway →
         // transition to RUNNING. 3 means spored/SSH isn't ready yet — stay SUBMITTED.
@@ -102,26 +117,57 @@ class SpawnTaskHandler extends TaskHandler {
     }
 
     // checkIfCompleted is polled while the task is RUNNING, for the full task
-    // duration. It returns true only when the workload has actually finished.
+    // duration. Completion is detected by the presence of the durable
+    // `.exitcode` object in the S3 work dir — NOT by SSH-ing the instance.
+    //
+    // Why not `spawn status --check-complete` (#34): that command SSHes into the
+    // instance to ask spored. But the task launches with `--on-complete
+    // terminate`, so the moment the task signals completion spored terminates
+    // the box — and every subsequent check SSHes a dead instance, returning
+    // "unreachable" forever, so the task never completes. The staging script
+    // already uploads `.exitcode` LAST (after outputs), so its appearance in S3
+    // is the authoritative, instance-independent "task finished" signal and
+    // carries the real exit status.
     @Override
     boolean checkIfCompleted() {
         if (status != TaskStatus.RUNNING) {
             return status == TaskStatus.COMPLETED
         }
-        int rc = spawnCheckComplete()
-        switch (rc) {
-            case 0:  // completed successfully
-                log.info "Task '${task.name}' completed on instance '${instanceName}'"
-                task.exitStatus = 0
-                status = TaskStatus.COMPLETED
-                return true
-            case 1:  // failed or cancelled
-                log.warn "Task '${task.name}' failed on instance '${instanceName}'"
-                task.exitStatus = 1
-                status = TaskStatus.COMPLETED
-                return true
-            default:  // 2 = still running, 3 = transient query error — keep polling
-                return false
+        Integer exit = readExitCodeFromS3()
+        if (exit == null) {
+            return false  // .exitcode not present yet — task still running
+        }
+        if (exit == 0) {
+            log.info "Task '${task.name}' completed (exit 0) on instance '${instanceName}'"
+        } else {
+            log.warn "Task '${task.name}' failed (exit ${exit}) on instance '${instanceName}'"
+        }
+        task.exitStatus = exit
+        status = TaskStatus.COMPLETED
+        return true
+    }
+
+    // readExitCodeFromS3 fetches <workDir>/.exitcode and returns its integer
+    // value, or null if it isn't present yet (task still running) or can't be
+    // parsed. Streams the object to stdout via `aws s3 cp <uri> -`.
+    private Integer readExitCodeFromS3() {
+        if (!workDirUri) {
+            return null
+        }
+        List<String> cmd = buildExitcodeProbeCommand(workDirUri, region)
+        try {
+            Process p = new ProcessBuilder(cmd).start()
+            String out = p.inputStream.text
+            int rc = p.waitFor()
+            if (rc != 0) {
+                // Non-zero almost always means the object doesn't exist yet
+                // (NoSuchKey / 404) → task not finished. Keep polling.
+                return null
+            }
+            return parseExitCode(out)
+        } catch (Exception e) {
+            log.debug "Error reading .exitcode for '${instanceName}': ${e.message}"
+            return null
         }
     }
 
@@ -247,6 +293,38 @@ class SpawnTaskHandler extends TaskHandler {
         sb << 'spored complete --status "${COMPLETE_STATUS}" 2>/dev/null || touch /tmp/SPAWN_COMPLETE\n'
 
         return sb.toString()
+    }
+
+    // buildExitcodeProbeCommand assembles the argv that streams the work dir's
+    // `.exitcode` object to stdout. `aws s3 cp <uri> -` exits non-zero (with a
+    // NoSuchKey/404) while the object is absent, which the caller treats as
+    // "not finished yet". The work dir URI is normalized to a single trailing
+    // segment `.exitcode` regardless of whether workDirUri has a trailing slash.
+    @groovy.transform.PackageScope
+    static List<String> buildExitcodeProbeCommand(String workDirUri, String region) {
+        String base = workDirUri?.endsWith('/') ? workDirUri[0..-2] : (workDirUri ?: '')
+        String uri = "${base}/.exitcode"
+        return ['aws', 's3', 'cp', uri, '-', '--region', (region ?: 'us-east-1')]
+    }
+
+    // parseExitCode extracts the integer exit status from the .exitcode object's
+    // contents (the staging script writes a single integer line). Returns null
+    // if the content isn't a parseable integer.
+    @groovy.transform.PackageScope
+    static Integer parseExitCode(String content) {
+        if (content == null) {
+            return null
+        }
+        String trimmed = content.trim()
+        if (!trimmed) {
+            return null
+        }
+        // Take the first whitespace-delimited token in case of trailing newline.
+        String token = trimmed.split(/\s+/)[0]
+        if (token ==~ /-?\d+/) {
+            return token.toInteger()
+        }
+        return null
     }
 
     // shellQuote single-quotes a value for safe interpolation into the script,
