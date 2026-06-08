@@ -127,4 +127,40 @@ class SpawnTaskHandlerTest extends Specification {
         SpawnTaskHandler.shellQuote("a'b")   == "'a'\\''b'"
         SpawnTaskHandler.shellQuote(null)    == "''"
     }
+
+    def 'completion probe reads <workDir>/.exitcode from S3, not the instance (#34)'() {
+        when:
+        def cmd = SpawnTaskHandler.buildExitcodeProbeCommand('s3://b/work/ab/cd', 'us-west-2')
+
+        then: 'streams the .exitcode object to stdout via aws s3 cp <uri> -'
+        cmd == ['aws', 's3', 'cp', 's3://b/work/ab/cd/.exitcode', '-', '--region', 'us-west-2']
+    }
+
+    def 'completion probe normalizes a trailing slash on the work dir URI'() {
+        expect:
+        SpawnTaskHandler.buildExitcodeProbeCommand('s3://b/work/ab/cd/', 'us-east-1')[3] == 's3://b/work/ab/cd/.exitcode'
+        SpawnTaskHandler.buildExitcodeProbeCommand('s3://b/work/ab/cd', 'us-east-1')[3]  == 's3://b/work/ab/cd/.exitcode'
+    }
+
+    def 'completion probe defaults the region when unset'() {
+        expect:
+        SpawnTaskHandler.buildExitcodeProbeCommand('s3://b/x', null).last() == 'us-east-1'
+    }
+
+    def 'parseExitCode reads the integer status, tolerating whitespace'() {
+        expect:
+        SpawnTaskHandler.parseExitCode(content) == expected
+
+        where:
+        content     | expected
+        '0'         | 0
+        '0\n'       | 0
+        '  1 '      | 1
+        '137\n'     | 137
+        '0\nnoise'  | 0
+        ''          | null
+        '   '       | null
+        null        | null
+        'notanint'  | null
+    }
 }
