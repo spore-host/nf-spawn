@@ -73,7 +73,7 @@ class SpawnTaskHandlerTest extends Specification {
         def workDir = 's3://my-bucket/work/ab/cdef0123456789'
 
         when:
-        def script = SpawnTaskHandler.buildStagingScript(workDir, 'us-west-2', 'echo hello > out.txt')
+        def script = SpawnTaskHandler.buildStagingScript(workDir, 'us-west-2', 'echo hello > out.txt', '')
 
         then: 'inputs are staged down from the S3 work dir before the task runs'
         def downIdx = script.indexOf('aws s3 sync "${WORKDIR_S3}" "${LOCAL_DIR}/"')
@@ -104,10 +104,45 @@ class SpawnTaskHandlerTest extends Specification {
         !script.contains('LOCAL_DIR=/tmp')
     }
 
+    def 'run line is bare bash when no container is set'() {
+        expect:
+        SpawnTaskHandler.buildRunLine(container) == 'bash .command.sh 1>.command.out 2>.command.err\n'
+
+        where:
+        container << [null, '', '   ']
+    }
+
+    def 'run line wraps the task in docker run when a container directive is set (#30)'() {
+        when:
+        def line = SpawnTaskHandler.buildRunLine('biocontainers/fastqc:0.12.1--hdfd78af_0')
+
+        then: 'runs inside the image via docker, with the work dir bind-mounted and set as cwd'
+        line.contains('docker run --rm -v "${LOCAL_DIR}":"${LOCAL_DIR}" -w "${LOCAL_DIR}"')
+        line.contains("'biocontainers/fastqc:0.12.1--hdfd78af_0'")
+        line.contains('bash .command.sh 1>.command.out 2>.command.err')
+
+        and: 'it does NOT run the script on the bare OS'
+        !line.startsWith('bash .command.sh')
+    }
+
+    def 'staging script honors the container directive end-to-end (#30)'() {
+        when:
+        def script = SpawnTaskHandler.buildStagingScript(
+            's3://b/work/aa/bb', 'us-east-1', 'fastqc reads.fq', 'biocontainers/fastqc:0.12.1--hdfd78af_0')
+
+        then: 'the task runs inside the container, not on the OS'
+        script.contains('docker run --rm')
+        script.contains("'biocontainers/fastqc:0.12.1--hdfd78af_0' bash .command.sh")
+
+        and: 'the real exit code (from docker run) is still captured'
+        script.contains('TASK_RC=$?')
+        script.contains('echo "${TASK_RC}" > .exitcode')
+    }
+
     def 'completion is signaled only after the task, reflecting its real exit code (#24)'() {
         when:
         def script = SpawnTaskHandler.buildStagingScript(
-            's3://b/work/aa/bb', 'us-east-1', 'run_task')
+            's3://b/work/aa/bb', 'us-east-1', 'run_task', '')
 
         then: 'status is derived from the task exit code, not hard-coded success'
         script.contains('if [ "${TASK_RC}" -eq 0 ]; then COMPLETE_STATUS=success; else COMPLETE_STATUS=failed; fi')
