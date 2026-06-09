@@ -56,9 +56,14 @@ class SpawnTaskHandler extends TaskHandler {
         this.workDirUri = task.workDirStr
         String workDirUri = this.workDirUri
 
+        // The container directive (if any): run the task inside it via Docker so
+        // tools that live only in the image (the norm for nf-core modules) are
+        // found, instead of on the bare OS (#30). Empty/null → run on the OS.
+        String container = (task.container ?: '') as String
+
         // Write the staging script to a temp file shipped as instance user-data.
         Path scriptFile = Files.createTempFile("nf-spawn-${instanceName}-", ".sh")
-        scriptFile.toFile().text = buildStagingScript(workDirUri, region, task.script)
+        scriptFile.toFile().text = buildStagingScript(workDirUri, region, task.script, container)
         scriptFile.toFile().setExecutable(true)
 
         // Build the spawn launch command
@@ -253,7 +258,7 @@ class SpawnTaskHandler extends TaskHandler {
     // under --on-complete terminate, whereas S3 sync is idempotent and
     // object-atomic.
     @groovy.transform.PackageScope
-    static String buildStagingScript(String workDirUri, String region, String taskScript) {
+    static String buildStagingScript(String workDirUri, String region, String taskScript, String container) {
         StringBuilder sb = new StringBuilder('#!/bin/bash\n')
         sb << 'set -uo pipefail\n\n'
         sb << "WORKDIR_S3=${shellQuote(workDirUri)}\n"
@@ -273,7 +278,7 @@ class SpawnTaskHandler extends TaskHandler {
         sb << taskScript
         sb << '\nNF_SPAWN_TASK_EOF\n'
         sb << 'chmod +x .command.sh\n'
-        sb << 'bash .command.sh 1>.command.out 2>.command.err\n'
+        sb << buildRunLine(container)
         sb << 'TASK_RC=$?\n'
         sb << 'echo "${TASK_RC}" > .exitcode\n\n'
 
@@ -293,6 +298,25 @@ class SpawnTaskHandler extends TaskHandler {
         sb << 'spored complete --status "${COMPLETE_STATUS}" 2>/dev/null || touch /tmp/SPAWN_COMPLETE\n'
 
         return sb.toString()
+    }
+
+    // buildRunLine produces the line that executes .command.sh, capturing stdout
+    // /stderr. With no container it runs on the bare OS (`bash .command.sh`).
+    // When the process has a `container` directive (#30 — the norm for nf-core
+    // modules), it runs inside that image via Docker so tools that live only in
+    // the container are found. The work dir is bind-mounted at the SAME path
+    // (${LOCAL_DIR}) and set as the working dir, so .command.sh's relative paths
+    // and the staged inputs/outputs all line up; `docker run` propagates the
+    // task's exit code so ${TASK_RC} stays accurate. --rm cleans up the
+    // container; the image is pulled on demand (Docker is preinstalled on the AMI).
+    @groovy.transform.PackageScope
+    static String buildRunLine(String container) {
+        if (!container?.trim()) {
+            return 'bash .command.sh 1>.command.out 2>.command.err\n'
+        }
+        String image = shellQuote(container.trim())
+        return 'docker run --rm -v "${LOCAL_DIR}":"${LOCAL_DIR}" -w "${LOCAL_DIR}" ' +
+            image + ' bash .command.sh 1>.command.out 2>.command.err\n'
     }
 
     // buildExitcodeProbeCommand assembles the argv that streams the work dir's
