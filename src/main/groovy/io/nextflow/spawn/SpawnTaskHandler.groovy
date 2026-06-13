@@ -296,8 +296,13 @@ class SpawnTaskHandler extends TaskHandler {
         sb << buildInputStaging(inputs)
 
         // 2. Materialize and run the task script; capture streams + real exit code.
+        //    The script is written flush-left (common leading indentation stripped)
+        //    the way Nextflow itself writes .command.sh — otherwise a source-indented
+        //    `<<-HEREDOC` terminator (e.g. nf-core's `versions.yml` block) stays
+        //    indented with spaces, which `<<-` (strips tabs only) can't match, so the
+        //    heredoc swallows its own terminator and the file is malformed (#43).
         sb << "cat > .command.sh <<'NF_SPAWN_TASK_EOF'\n"
-        sb << taskScript
+        sb << dedentTaskScript(taskScript)
         sb << '\nNF_SPAWN_TASK_EOF\n'
         sb << 'chmod +x .command.sh\n'
         sb << buildRunLine(container, runOptions)
@@ -474,6 +479,56 @@ class SpawnTaskHandler extends TaskHandler {
             return token.toInteger()
         }
         return null
+    }
+
+    // dedentTaskScript writes the task body the way Nextflow writes .command.sh:
+    // flush-left, with the common leading whitespace shared by every non-blank
+    // line removed. nf-core modules indent their process script for readability
+    // and rely on a `<<-END_VERSIONS` heredoc whose terminator sits at the SAME
+    // indentation — and `<<-` strips leading TABS only. When we embedded the raw
+    // (space-indented) source into our staging heredoc, the terminator stayed
+    // indented, `<<-` couldn't strip the spaces, and the heredoc swallowed its
+    // own terminator → malformed versions.yml → SnakeYAML aborts the session (#43).
+    //
+    // We strip the longest common leading-whitespace PREFIX (not a column count),
+    // so mixed tab/space indentation is handled uniformly and relative indentation
+    // within the script is preserved — matching Groovy's stripIndent semantics.
+    // Blank lines are ignored when computing the common prefix.
+    @groovy.transform.PackageScope
+    static String dedentTaskScript(String script) {
+        if (!script) return script ?: ''
+        final String[] lines = script.split('\n', -1)
+        String common = null
+        for (String line : lines) {
+            if (!line.trim()) continue   // ignore blank/whitespace-only lines
+            final String indent = leadingWhitespace(line)
+            if (common == null) {
+                common = indent
+            } else {
+                // shrink `common` to the shared prefix of itself and this indent
+                int n = 0
+                final int max = Math.min(common.length(), indent.length())
+                while (n < max && common.charAt(n) == indent.charAt(n)) n++
+                common = common.substring(0, n)
+            }
+            if (common.isEmpty()) break
+        }
+        if (!common) return script
+        final String prefix = common
+        StringBuilder out = new StringBuilder()
+        for (int i = 0; i < lines.length; i++) {
+            if (i > 0) out << '\n'
+            final String l = lines[i]
+            out << (l.startsWith(prefix) ? l.substring(prefix.length()) : l)
+        }
+        return out.toString()
+    }
+
+    // leadingWhitespace returns the run of spaces/tabs at the start of a line.
+    private static String leadingWhitespace(String line) {
+        int i = 0
+        while (i < line.length() && (line.charAt(i) == ' ' as char || line.charAt(i) == '\t' as char)) i++
+        return line.substring(0, i)
     }
 
     // shellQuote single-quotes a value for safe interpolation into the script,
