@@ -141,6 +141,38 @@ class SpawnTaskHandlerTest extends Specification {
         script.contains('echo "${TASK_RC}" > .exitcode')
     }
 
+    def 'run line splices docker.runOptions before the image (#39)'() {
+        when:
+        def line = SpawnTaskHandler.buildRunLine('biocontainers/fastqc:0.12.1--hdfd78af_0', '--user root')
+
+        then: 'the run options appear between the docker run flags and the image'
+        line.contains('-w "${LOCAL_DIR}" --user root \'biocontainers/fastqc:0.12.1--hdfd78af_0\'')
+
+        and: 'still runs the task script inside the container'
+        line.contains('bash .command.sh 1>.command.out 2>.command.err')
+    }
+
+    def 'run line omits run options when none are given (#39)'() {
+        when:
+        def line = SpawnTaskHandler.buildRunLine('biocontainers/fastqc:0.12.1--hdfd78af_0')
+
+        then: 'no stray separator between the docker flags and the image'
+        line.contains('-w "${LOCAL_DIR}" \'biocontainers/fastqc:0.12.1--hdfd78af_0\'')
+    }
+
+    def 'staging script makes the work dir world-writable and honors run options (#39)'() {
+        when:
+        def script = SpawnTaskHandler.buildStagingScript(
+            's3://b/work/aa/bb', 'us-east-1', 'fastqc reads.fq',
+            'biocontainers/fastqc:0.12.1--hdfd78af_0', [:], '--user root')
+
+        then: 'the work dir is made writable so a non-root container user can write outputs'
+        script.contains('chmod 0777 "${LOCAL_DIR}"')
+
+        and: 'the resolved run options reach the docker run line'
+        script.contains('--user root \'biocontainers/fastqc:0.12.1--hdfd78af_0\' bash .command.sh')
+    }
+
     def 'completion is signaled only after the task, reflecting its real exit code (#24)'() {
         when:
         def script = SpawnTaskHandler.buildStagingScript(

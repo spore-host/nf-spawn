@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-06-13
+
+### Fixed
+- Containerized tasks now honor `docker.runOptions` and the per-process
+  `containerOptions` directive (e.g. `--user root`), which were previously
+  dropped — so a pipeline that relies on them to run the container as a writable
+  user is respected again. The task work dir is also made world-writable
+  (`chmod 0777`) before the container runs, so a non-root image user can write
+  its outputs into the bind-mounted dir instead of failing with "Permission
+  denied" (#39).
+
 ## [0.2.9] - 2026-06-13
 
 ### Fixed
@@ -29,6 +40,7 @@ Baseline. Earlier history is in the
 
 ---
 
-[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.2.10...HEAD
+[0.2.10]: https://github.com/spore-host/nf-spawn/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/spore-host/nf-spawn/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/spore-host/nf-spawn/releases/tag/v0.2.8
