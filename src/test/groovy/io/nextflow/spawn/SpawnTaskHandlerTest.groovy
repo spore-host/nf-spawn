@@ -173,6 +173,50 @@ class SpawnTaskHandlerTest extends Specification {
         script.contains('--user root \'biocontainers/fastqc:0.12.1--hdfd78af_0\' bash .command.sh')
     }
 
+    def 'dedentTaskScript strips the common leading indentation, flush-left like Nextflow (#43)'() {
+        given: 'an nf-core-style indented script with a `<<-` versions heredoc'
+        def src = [
+            '    fastqc reads.fq',
+            '',
+            '    cat <<-END_VERSIONS > versions.yml',
+            '    "FASTQC":',
+            '        fastqc: 0.12.1',
+            '    END_VERSIONS',
+        ].join('\n')
+
+        when:
+        def out = SpawnTaskHandler.dedentTaskScript(src)
+
+        then: 'the common 4-space indent is removed so the heredoc terminator lands at column 0'
+        out.readLines().contains('END_VERSIONS')
+        out.startsWith('fastqc reads.fq')
+
+        and: 'relative indentation INSIDE the script is preserved'
+        out.contains('\n    fastqc: 0.12.1\n')
+
+        and: 'the blank line is untouched (not used to compute the common prefix)'
+        out.contains('\n\ncat <<-END_VERSIONS')
+    }
+
+    def 'dedentTaskScript leaves an already flush-left script unchanged (#43)'() {
+        expect:
+        SpawnTaskHandler.dedentTaskScript('echo hi\nls -l') == 'echo hi\nls -l'
+        SpawnTaskHandler.dedentTaskScript('') == ''
+        SpawnTaskHandler.dedentTaskScript(null) == ''
+    }
+
+    def 'staging script writes the task body flush-left so `<<-` heredoc terminators match (#43)'() {
+        given:
+        def taskScript = '    cat <<-END_VERSIONS > versions.yml\n    "FASTQC":\n    END_VERSIONS'
+
+        when:
+        def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', taskScript, '')
+
+        then: 'the embedded terminator is at column 0, not space-indented'
+        script.contains('\nEND_VERSIONS\nNF_SPAWN_TASK_EOF')
+        !script.contains('    END_VERSIONS')
+    }
+
     def 'completion is signaled only after the task, reflecting its real exit code (#24)'() {
         when:
         def script = SpawnTaskHandler.buildStagingScript(

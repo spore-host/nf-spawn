@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-06-13
+
+### Fixed
+- The task script is now written into `.command.sh` flush-left (common leading
+  indentation stripped), the way Nextflow itself writes it. Previously the
+  source indentation was preserved, so an nf-core module's space-indented
+  `<<-END_VERSIONS` heredoc terminator stayed indented — and `<<-` strips leading
+  tabs only, never spaces — so the heredoc swallowed its own terminator and
+  produced a malformed `versions.yml`, which aborted the whole Nextflow session
+  with a SnakeYAML `while scanning a simple key` error. Essentially every nf-core
+  module (they all emit `versions.yml` this way) was affected (#43).
+
 ## [0.2.11] - 2026-06-13
 
 ### Fixed
@@ -56,7 +68,8 @@ Baseline. Earlier history is in the
 
 ---
 
-[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.2.11...HEAD
+[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.2.12...HEAD
+[0.2.12]: https://github.com/spore-host/nf-spawn/compare/v0.2.11...v0.2.12
 [0.2.11]: https://github.com/spore-host/nf-spawn/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/spore-host/nf-spawn/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/spore-host/nf-spawn/compare/v0.2.8...v0.2.9
