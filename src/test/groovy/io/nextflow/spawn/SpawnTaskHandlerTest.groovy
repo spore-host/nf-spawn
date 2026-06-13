@@ -2,6 +2,8 @@ package io.nextflow.spawn
 
 import spock.lang.Specification
 
+import java.nio.file.Path
+
 class SpawnTaskHandlerTest extends Specification {
 
     def 'passes the task script via --user-data-file, not a bare --user-data path (#13)'() {
@@ -154,6 +156,77 @@ class SpawnTaskHandlerTest extends Specification {
         and: 'completion is the LAST step — strictly after the task runs and outputs sync'
         script.indexOf('spored complete') > script.indexOf('bash .command.sh')
         script.indexOf('spored complete') > script.indexOf('aws s3 cp .exitcode')
+    }
+
+    // ── #37: declared input localization ──────────────────────────────────────
+
+    // A java.nio.file.Path stub whose toUri() returns the given URI — lets us
+    // test stage-in generation without registering the S3 NIO provider.
+    private Path s3Path(String uri) {
+        Stub(Path) { toUri() >> URI.create(uri) }
+    }
+
+    def 'staging localizes each declared s3:// input by its source URI to its stage name (#37)'() {
+        given: 'inputs that live OUTSIDE this task work dir (upstream/samplesheet)'
+        def inputs = [
+            'reads_1.fastq.gz': s3Path('s3://data/sra/SRR059374_1.fastq.gz'),
+            'reads_2.fastq.gz': s3Path('s3://data/sra/SRR059374_2.fastq.gz'),
+        ] as Map<String, java.nio.file.Path>
+
+        when:
+        def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'fastqc reads_1.fastq.gz reads_2.fastq.gz', '', inputs)
+
+        then: 'each input is copied from its real source to ${LOCAL_DIR}/<stageName>'
+        script.contains('''aws s3 cp 's3://data/sra/SRR059374_1.fastq.gz' '${LOCAL_DIR}/reads_1.fastq.gz' --region "${AWS_REGION}"''')
+        script.contains('''aws s3 cp 's3://data/sra/SRR059374_2.fastq.gz' '${LOCAL_DIR}/reads_2.fastq.gz' --region "${AWS_REGION}"''')
+
+        and: 'inputs are staged before the task runs'
+        script.indexOf('aws s3 cp ') < script.indexOf('bash .command.sh')
+    }
+
+    def 'directory inputs (trailing slash) are copied recursively (#37)'() {
+        given:
+        def inputs = ['refdir': s3Path('s3://data/genome/')] as Map<String, java.nio.file.Path>
+
+        when:
+        def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'use refdir', '', inputs)
+
+        then:
+        script.contains('''aws s3 cp 's3://data/genome/' '${LOCAL_DIR}/refdir' --region "${AWS_REGION}" --recursive''')
+    }
+
+    def 'a stage name with a subdir is mkdir -p before the copy (#37)'() {
+        given:
+        def inputs = ['db/blast.fa': s3Path('s3://data/db/blast.fa')] as Map<String, java.nio.file.Path>
+
+        when:
+        def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'blast', '', inputs)
+
+        then:
+        def mkdirIdx = script.indexOf("mkdir -p '\${LOCAL_DIR}/db'")
+        def cpIdx = script.indexOf('''aws s3 cp 's3://data/db/blast.fa' '${LOCAL_DIR}/db/blast.fa''')
+        mkdirIdx >= 0
+        cpIdx > mkdirIdx
+    }
+
+    def 'non-s3 inputs are not given a copy command (left to the work-dir sync) (#37)'() {
+        given:
+        def inputs = ['local.txt': s3Path('file:///some/local/path.txt')] as Map<String, java.nio.file.Path>
+
+        when:
+        def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'cat local.txt', '', inputs)
+
+        then: 'no aws s3 cp for a non-s3 source'
+        !script.contains("aws s3 cp 'file://")
+    }
+
+    def 'no input-staging block when there are no declared inputs'() {
+        when:
+        def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'echo hi', '')
+
+        then: 'the work-dir sync still runs, but no per-input copies'
+        script.contains('aws s3 sync "${WORKDIR_S3}"')
+        !script.contains('Localize declared inputs')
     }
 
     def 'staging script single-quotes values and escapes embedded quotes'() {
