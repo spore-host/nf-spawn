@@ -8,7 +8,7 @@ plugins {
 }
 
 group = 'io.nextflow'
-version = '0.2.9'
+version = '0.2.10'
 
 nextflowPlugin {
     // The Nextflow version this plugin is built against and tracks. Bump this

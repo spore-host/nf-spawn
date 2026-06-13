@@ -61,9 +61,15 @@ class SpawnTaskHandler extends TaskHandler {
         // found, instead of on the bare OS (#30). Empty/null → run on the OS.
         String container = (task.container ?: '') as String
 
+        // Resolve docker run options so the container honors `docker.runOptions`
+        // (e.g. `--user root`) and the per-process `containerOptions` directive —
+        // dropping them made the container run as the image's default user and
+        // fail to write the work dir (#39).
+        String runOptions = resolveDockerRunOptions(task)
+
         // Write the staging script to a temp file shipped as instance user-data.
         Path scriptFile = Files.createTempFile("nf-spawn-${instanceName}-", ".sh")
-        scriptFile.toFile().text = buildStagingScript(workDirUri, region, task.script, container, task.getInputFilesMap())
+        scriptFile.toFile().text = buildStagingScript(workDirUri, region, task.script, container, task.getInputFilesMap(), runOptions)
         scriptFile.toFile().setExecutable(true)
 
         // Build the spawn launch command
@@ -258,7 +264,7 @@ class SpawnTaskHandler extends TaskHandler {
     // under --on-complete terminate, whereas S3 sync is idempotent and
     // object-atomic.
     @groovy.transform.PackageScope
-    static String buildStagingScript(String workDirUri, String region, String taskScript, String container, Map<String, Path> inputs = [:]) {
+    static String buildStagingScript(String workDirUri, String region, String taskScript, String container, Map<String, Path> inputs = [:], String runOptions = '') {
         StringBuilder sb = new StringBuilder('#!/bin/bash\n')
         sb << 'set -uo pipefail\n\n'
         sb << "WORKDIR_S3=${shellQuote(workDirUri)}\n"
@@ -268,6 +274,14 @@ class SpawnTaskHandler extends TaskHandler {
         // with "No space left on device" long before the 80 GB root fills (#27).
         sb << 'LOCAL_DIR=/var/lib/nf-work\n\n'
         sb << 'sudo mkdir -p "${LOCAL_DIR}" && sudo chown "$(id -u):$(id -g)" "${LOCAL_DIR}"\n'
+        // The staging script runs as root (EC2 user-data), so ${LOCAL_DIR} and
+        // the staged files are root-owned. A containerized task whose image runs
+        // as a NON-root default user (the norm for biocontainers/nf-core) then
+        // can't create the symlinks .command.sh makes or write outputs into the
+        // work dir → "Permission denied" (#39). World-writable the dir so the
+        // container's user can write regardless of whether --user is set. (The
+        // dir is on an ephemeral instance that's terminated after the task.)
+        sb << 'chmod 0777 "${LOCAL_DIR}"\n'
 
         // 1a. Sync this task's own S3 work dir down (.command.sh metadata etc.).
         sb << 'aws s3 sync "${WORKDIR_S3}" "${LOCAL_DIR}/" --region "${AWS_REGION}" --quiet\n'
@@ -286,7 +300,7 @@ class SpawnTaskHandler extends TaskHandler {
         sb << taskScript
         sb << '\nNF_SPAWN_TASK_EOF\n'
         sb << 'chmod +x .command.sh\n'
-        sb << buildRunLine(container)
+        sb << buildRunLine(container, runOptions)
         sb << 'TASK_RC=$?\n'
         sb << 'echo "${TASK_RC}" > .exitcode\n\n'
 
@@ -369,14 +383,43 @@ class SpawnTaskHandler extends TaskHandler {
     // and the staged inputs/outputs all line up; `docker run` propagates the
     // task's exit code so ${TASK_RC} stays accurate. --rm cleans up the
     // container; the image is pulled on demand (Docker is preinstalled on the AMI).
+    //
+    // runOptions is spliced in verbatim (the resolved `docker.runOptions` +
+    // per-process `containerOptions`). Dropping it meant a pipeline's
+    // `docker { runOptions = '--user root' }` was ignored, so the container ran
+    // as the image's default (non-root) user and couldn't write the work dir —
+    // every stock module that symlinks inputs / writes outputs failed with
+    // "Permission denied" (#39).
+    // resolveDockerRunOptions gathers the docker run flags Nextflow would apply:
+    // the engine-scope `docker.runOptions` (from the task's ContainerConfig) plus
+    // the per-process `containerOptions` directive. Returned as a single string to
+    // splice into the `docker run` argv. Best-effort and null-safe — any access
+    // failure yields '' (run with no extra options) rather than aborting the task.
     @groovy.transform.PackageScope
-    static String buildRunLine(String container) {
+    static String resolveDockerRunOptions(TaskRun task) {
+        List<String> parts = []
+        try {
+            def cfg = task.getContainerConfig()
+            // ContainerConfig is a Map; runOptions is a plain key.
+            def ro = (cfg instanceof Map) ? (cfg as Map).get('runOptions') : null
+            if (ro) parts << ro.toString().trim()
+        } catch (Exception ignored) { }
+        try {
+            String co = task.config?.getContainerOptions()
+            if (co?.trim()) parts << co.trim()
+        } catch (Exception ignored) { }
+        return parts.findAll { it }.join(' ').trim()
+    }
+
+    @groovy.transform.PackageScope
+    static String buildRunLine(String container, String runOptions = '') {
         if (!container?.trim()) {
             return 'bash .command.sh 1>.command.out 2>.command.err\n'
         }
         String image = shellQuote(container.trim())
+        String opts = runOptions?.trim() ? runOptions.trim() + ' ' : ''
         return 'docker run --rm -v "${LOCAL_DIR}":"${LOCAL_DIR}" -w "${LOCAL_DIR}" ' +
-            image + ' bash .command.sh 1>.command.out 2>.command.err\n'
+            opts + image + ' bash .command.sh 1>.command.out 2>.command.err\n'
     }
 
     // buildExitcodeProbeCommand assembles the argv that streams the work dir's
