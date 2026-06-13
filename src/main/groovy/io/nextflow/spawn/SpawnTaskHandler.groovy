@@ -63,7 +63,7 @@ class SpawnTaskHandler extends TaskHandler {
 
         // Write the staging script to a temp file shipped as instance user-data.
         Path scriptFile = Files.createTempFile("nf-spawn-${instanceName}-", ".sh")
-        scriptFile.toFile().text = buildStagingScript(workDirUri, region, task.script, container)
+        scriptFile.toFile().text = buildStagingScript(workDirUri, region, task.script, container, task.getInputFilesMap())
         scriptFile.toFile().setExecutable(true)
 
         // Build the spawn launch command
@@ -258,7 +258,7 @@ class SpawnTaskHandler extends TaskHandler {
     // under --on-complete terminate, whereas S3 sync is idempotent and
     // object-atomic.
     @groovy.transform.PackageScope
-    static String buildStagingScript(String workDirUri, String region, String taskScript, String container) {
+    static String buildStagingScript(String workDirUri, String region, String taskScript, String container, Map<String, Path> inputs = [:]) {
         StringBuilder sb = new StringBuilder('#!/bin/bash\n')
         sb << 'set -uo pipefail\n\n'
         sb << "WORKDIR_S3=${shellQuote(workDirUri)}\n"
@@ -269,9 +269,17 @@ class SpawnTaskHandler extends TaskHandler {
         sb << 'LOCAL_DIR=/var/lib/nf-work\n\n'
         sb << 'sudo mkdir -p "${LOCAL_DIR}" && sudo chown "$(id -u):$(id -g)" "${LOCAL_DIR}"\n'
 
-        // 1. Stage inputs down from the S3 work dir.
+        // 1a. Sync this task's own S3 work dir down (.command.sh metadata etc.).
         sb << 'aws s3 sync "${WORKDIR_S3}" "${LOCAL_DIR}/" --region "${AWS_REGION}" --quiet\n'
         sb << 'cd "${LOCAL_DIR}"\n\n'
+
+        // 1b. Localize Nextflow's DECLARED inputs by their real source URI. A
+        // task's `path` inputs usually live OUTSIDE its own work dir — they're
+        // produced by an upstream process, or come from a samplesheet / channel
+        // (often s3://) — so the work-dir sync above never pulls them, and stock
+        // nf-core modules run with their inputs missing (#37). Copy each declared
+        // input from its source to the local stage name it's referenced by.
+        sb << buildInputStaging(inputs)
 
         // 2. Materialize and run the task script; capture streams + real exit code.
         sb << "cat > .command.sh <<'NF_SPAWN_TASK_EOF'\n"
@@ -297,6 +305,58 @@ class SpawnTaskHandler extends TaskHandler {
         sb << 'if [ "${TASK_RC}" -eq 0 ]; then COMPLETE_STATUS=success; else COMPLETE_STATUS=failed; fi\n'
         sb << 'spored complete --status "${COMPLETE_STATUS}" 2>/dev/null || touch /tmp/SPAWN_COMPLETE\n'
 
+        return sb.toString()
+    }
+
+    // buildInputStaging emits the commands that localize a task's declared input
+    // files onto the instance, keyed by the stage name `.command.sh` references
+    // them by (#37). Nextflow resolves each input to a source Path; for the spawn
+    // executor (S3 work dir) those are typically `s3://…` URIs from an upstream
+    // task, a samplesheet, or a channel. We copy each to ${LOCAL_DIR}/<stageName>
+    // so the symlinks `.command.sh` creates resolve.
+    //
+    // - s3:// sources → `aws s3 cp` (--recursive when the source is a directory).
+    // - Any other scheme/local path is left to the work-dir sync (1a); we don't
+    //   second-guess it here.
+    // Idempotent and best-effort per file; a stage name may include subdirs
+    // (Nextflow allows `path`d inputs under a relative dir), so we mkdir -p first.
+    @groovy.transform.PackageScope
+    static String buildInputStaging(Map<String, Path> inputs) {
+        if (!inputs) return ''
+        StringBuilder sb = new StringBuilder()
+        sb << '# Localize declared inputs by source URI (#37 — they live outside this work dir).\n'
+        inputs.each { String stageName, Path source ->
+            final uri = source.toUri().toString()
+            if (!uri.startsWith('s3://')) {
+                // Non-S3 source (already local, or another provider) — the
+                // work-dir sync handles the common case; skip to avoid emitting
+                // a broken copy for a path that isn't reachable as-is.
+                return
+            }
+            final dest = "\${LOCAL_DIR}/${stageName}"
+            final destParent = stageName.contains('/') ? stageName.substring(0, stageName.lastIndexOf('/')) : ''
+            if (destParent) {
+                sb << "mkdir -p ${shellQuote('${LOCAL_DIR}/' + destParent)}\n"
+            }
+            // Directory inputs need `aws s3 cp --recursive`; a single-object cp
+            // of a prefix would silently copy nothing. Detect a directory by the
+            // resolved Path (Files.isDirectory) — an s3:// directory input doesn't
+            // always render with a trailing slash, so the slash alone is
+            // unreliable (PR #38 review) — but ALSO honor a trailing slash, since
+            // that's unambiguously a directory even if the path can't be stat'd
+            // (provider not registered, etc.).
+            boolean isDir = uri.endsWith('/')
+            if (!isDir) {
+                try {
+                    isDir = Files.isDirectory(source)
+                } catch (Exception ignored) {
+                    // can't stat — leave as the trailing-slash verdict (false)
+                }
+            }
+            final recursive = isDir ? ' --recursive' : ''
+            sb << "aws s3 cp ${shellQuote(uri)} ${shellQuote(dest)} --region \"\${AWS_REGION}\"${recursive} --quiet\n"
+        }
+        sb << '\n'
         return sb.toString()
     }
 
