@@ -208,9 +208,15 @@ class SpawnTaskHandlerTest extends Specification {
         when:
         def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'fastqc reads_1.fastq.gz reads_2.fastq.gz', '', inputs)
 
-        then: 'each input is copied from its real source to ${LOCAL_DIR}/<stageName>'
-        script.contains('''aws s3 cp 's3://data/sra/SRR059374_1.fastq.gz' '${LOCAL_DIR}/reads_1.fastq.gz' --region "${AWS_REGION}"''')
-        script.contains('''aws s3 cp 's3://data/sra/SRR059374_2.fastq.gz' '${LOCAL_DIR}/reads_2.fastq.gz' --region "${AWS_REGION}"''')
+        then: 'each input is copied from its real source to ${LOCAL_DIR}/<stageName>, with ${LOCAL_DIR} OUTSIDE the quotes so it expands (#41)'
+        script.contains('''aws s3 cp 's3://data/sra/SRR059374_1.fastq.gz' "${LOCAL_DIR}/"'reads_1.fastq.gz' --region "${AWS_REGION}"''')
+        script.contains('''aws s3 cp 's3://data/sra/SRR059374_2.fastq.gz' "${LOCAL_DIR}/"'reads_2.fastq.gz' --region "${AWS_REGION}"''')
+
+        and: 'the destination does not pass an unexpanded literal ${LOCAL_DIR} to aws (#41 bug 2)'
+        !script.contains('''cp 's3://data/sra/SRR059374_1.fastq.gz' '${LOCAL_DIR}/''')
+
+        and: 'a failed input copy fails loud instead of being silently ignored (#41)'
+        script.contains('|| { echo "nf-spawn: failed to stage input reads_1.fastq.gz')
 
         and: 'inputs are staged before the task runs'
         script.indexOf('aws s3 cp ') < script.indexOf('bash .command.sh')
@@ -224,7 +230,7 @@ class SpawnTaskHandlerTest extends Specification {
         def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'use refdir', '', inputs)
 
         then:
-        script.contains('''aws s3 cp 's3://data/genome/' '${LOCAL_DIR}/refdir' --region "${AWS_REGION}" --recursive''')
+        script.contains('''aws s3 cp 's3://data/genome/' "${LOCAL_DIR}/"'refdir' --region "${AWS_REGION}" --recursive''')
     }
 
     def 'a stage name with a subdir is mkdir -p before the copy (#37)'() {
@@ -234,9 +240,9 @@ class SpawnTaskHandlerTest extends Specification {
         when:
         def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'blast', '', inputs)
 
-        then:
-        def mkdirIdx = script.indexOf("mkdir -p '\${LOCAL_DIR}/db'")
-        def cpIdx = script.indexOf('''aws s3 cp 's3://data/db/blast.fa' '${LOCAL_DIR}/db/blast.fa''')
+        then: 'mkdir and cp both keep ${LOCAL_DIR} outside the quotes so it expands (#41)'
+        def mkdirIdx = script.indexOf('mkdir -p "${LOCAL_DIR}/"\'db\'')
+        def cpIdx = script.indexOf('''aws s3 cp 's3://data/db/blast.fa' "${LOCAL_DIR}/"'db/blast.fa''')
         mkdirIdx >= 0
         cpIdx > mkdirIdx
     }
@@ -250,6 +256,25 @@ class SpawnTaskHandlerTest extends Specification {
 
         then: 'no aws s3 cp for a non-s3 source'
         !script.contains("aws s3 cp 'file://")
+    }
+
+    def 'a malformed s3:/// source (empty authority) is repaired to s3:// (#41 bug 1)'() {
+        given: 'the nf-amazon Path renders toUri() with an empty authority — bucket lands in the path'
+        def inputs = ['reads.fq.gz': s3Path('s3:///my-bucket/work/fetch/SRR059375_1.fastq.gz')] as Map<String, java.nio.file.Path>
+
+        when:
+        def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'fastqc reads.fq.gz', '', inputs)
+
+        then: 'the copy source has a proper bucket authority (two slashes), not three'
+        script.contains('''aws s3 cp 's3://my-bucket/work/fetch/SRR059375_1.fastq.gz' "${LOCAL_DIR}/"\'reads.fq.gz\'''')
+        !script.contains("aws s3 cp 's3:///")
+    }
+
+    def 'normalizeS3Uri collapses an empty authority and leaves a well-formed URI alone (#41)'() {
+        expect:
+        SpawnTaskHandler.normalizeS3Uri('s3:///bucket/key') == 's3://bucket/key'
+        SpawnTaskHandler.normalizeS3Uri('s3://bucket/key') == 's3://bucket/key'
+        SpawnTaskHandler.normalizeS3Uri('file:///x') == 'file:///x'
     }
 
     def 'no input-staging block when there are no declared inputs'() {
