@@ -65,11 +65,31 @@ process {
     withName: 'FASTP' {
         ext.instanceType = 't4g.medium'    // cheap QC step
     }
+
+    // Attach a pre-populated EBS volume from a snapshot (e.g. a large reference
+    // DB) instead of baking it into a custom AMI. Mounted read-only by default;
+    // requires spawn >= 0.46.0.
+    withName: 'KRAKEN2_KRAKEN2' {
+        ext.instanceType = 'r7g.2xlarge'
+        ext.volumes = [[ snapshot: 'snap-0abc', mount: '/opt/databases/kraken2', readOnly: true ]]
+    }
 }
 
 // S3 work directory (required for multi-instance pipelines)
 workDir = 's3://my-bucket/nextflow-work'
 ```
+
+### Per-process `ext` options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `ext.instanceType` | `t3.medium` | EC2 instance type for the task |
+| `ext.region` | `us-east-1` | AWS region |
+| `ext.ttl` | `2h` | Max instance lifetime (safety backstop) |
+| `ext.spot` | `false` | Launch as a Spot instance |
+| `ext.ami` | _(auto)_ | Explicit AMI ID; omit to let spawn auto-detect a stock AMI |
+| `ext.volumeSize` | _(AMI min)_ | Extra root EBS size in GiB beyond the AMI minimum |
+| `ext.volumes` | _(none)_ | List of `[snapshot:, mount:, readOnly:]` maps — attach EBS data volumes from snapshots (read-only by default). Requires spawn ≥ 0.46.0 |
 
 ## Example pipeline
 

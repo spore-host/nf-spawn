@@ -46,6 +46,12 @@ class SpawnTaskHandler extends TaskHandler {
         String ami          = (ext.ami ?: '') as String
         int volumeSize      = (ext.volumeSize ?: 0) as int
 
+        // Attach pre-populated EBS data volumes from snapshots, mounted read-only
+        // by default — so a large reference DB (e.g. Kraken2) lives in a
+        // re-snapshottable volume on a stock AMI instead of being baked into a
+        // custom AMI (#45 → spawn#144). Each becomes a `spawn launch --attach-volume`.
+        List<String> attachVolumes = parseVolumeSpecs(ext.volumes)
+
         log.info "Submitting task '${task.name}' to spawn instance '${instanceName}' (${instanceType} in ${region})"
 
         // task.workDir is the directory Nextflow reads back after the task to
@@ -73,7 +79,7 @@ class SpawnTaskHandler extends TaskHandler {
         scriptFile.toFile().setExecutable(true)
 
         // Build the spawn launch command
-        List<String> cmd = buildLaunchCommand(instanceName, instanceType, region, ttl, spot, scriptFile.toString(), ami, volumeSize)
+        List<String> cmd = buildLaunchCommand(instanceName, instanceType, region, ttl, spot, scriptFile.toString(), ami, volumeSize, attachVolumes)
 
         log.debug "spawn launch command: ${cmd.join(' ')}"
 
@@ -220,10 +226,15 @@ class SpawnTaskHandler extends TaskHandler {
     // floors the root volume at the AMI snapshot minimum automatically, so this
     // is NOT needed just to fit a large baked AMI — it's for requesting EXTRA
     // working space beyond that minimum. spawn keeps the larger of the two.
+    //
+    // --attach-volume (repeatable) attaches a pre-populated EBS volume from a
+    // snapshot; each value is `snap-xxx:/mount[:ro|:rw]` (spawn#144). Used to
+    // mount large reference data on a stock AMI (#45).
     @groovy.transform.PackageScope
     static List<String> buildLaunchCommand(String instanceName, String instanceType,
                                            String region, String ttl, boolean spot,
-                                           String scriptPath, String ami, int volumeSize) {
+                                           String scriptPath, String ami, int volumeSize,
+                                           List<String> attachVolumes = []) {
         List<String> cmd = [
             'spawn', 'launch', instanceName,
             '--instance-type', instanceType,
@@ -241,10 +252,48 @@ class SpawnTaskHandler extends TaskHandler {
         if (volumeSize > 0) {
             cmd.addAll(['--volume-size', volumeSize.toString()])
         }
+        for (String v : (attachVolumes ?: [])) {
+            cmd.addAll(['--attach-volume', v])
+        }
         if (spot) {
             cmd << '--spot'
         }
         return cmd
+    }
+
+    // parseVolumeSpecs turns the `ext.volumes` directive into `spawn launch
+    // --attach-volume` argument values of the form `snap-xxx:/mount[:ro|:rw]`
+    // (#45 → spawn#144). The directive is a list of maps, each:
+    //   [ snapshot: 'snap-0abc', mount: '/opt/databases/kraken2', readOnly: true ]
+    // `readOnly` defaults to true (the common case for shared reference data).
+    // A single map (one volume) is accepted too. Null/empty → no volumes.
+    @groovy.transform.PackageScope
+    static List<String> parseVolumeSpecs(Object volumes) {
+        if (!volumes) return []
+        List rawList
+        if (volumes instanceof List) {
+            rawList = volumes as List
+        } else if (volumes instanceof Map) {
+            rawList = [volumes]
+        } else {
+            throw new AbortOperationException("ext.volumes must be a list of maps (or a single map), got: ${volumes.getClass().name}")
+        }
+        List<String> specs = []
+        for (Object o : rawList) {
+            if (!(o instanceof Map)) {
+                throw new AbortOperationException("each ext.volumes entry must be a map with 'snapshot' and 'mount', got: ${o}")
+            }
+            Map m = o as Map
+            String snap  = (m.snapshot ?: m.snapshotId ?: '') as String
+            String mount = (m.mount ?: m.mountPoint ?: '') as String
+            if (!snap || !mount) {
+                throw new AbortOperationException("ext.volumes entry needs both 'snapshot' and 'mount': ${m}")
+            }
+            // readOnly defaults to true; an explicit false → :rw.
+            boolean readOnly = m.containsKey('readOnly') ? (m.readOnly ? true : false) : true
+            specs << "${snap}:${mount}:${readOnly ? 'ro' : 'rw'}".toString()
+        }
+        return specs
     }
 
     // buildStagingScript produces the instance user-data script that returns
