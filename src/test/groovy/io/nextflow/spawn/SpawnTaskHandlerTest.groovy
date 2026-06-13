@@ -70,6 +70,49 @@ class SpawnTaskHandlerTest extends Specification {
         !withoutSize.contains('--volume-size')
     }
 
+    def 'forwards ext.volumes as repeated --attach-volume args (#45)'() {
+        when:
+        def cmd = SpawnTaskHandler.buildLaunchCommand(
+            'n', 'r7g.2xlarge', 'us-east-1', '2h', false, '/s.sh', '', 0,
+            ['snap-aaa:/opt/databases/kraken2:ro', 'snap-bbb:/data:rw'])
+
+        then: 'each volume becomes its own --attach-volume <spec>'
+        cmd.count { it == '--attach-volume' } == 2
+        def i = cmd.indexOf('--attach-volume')
+        cmd[i + 1] == 'snap-aaa:/opt/databases/kraken2:ro'
+
+        and: 'no --attach-volume when none given (back-compat default)'
+        !SpawnTaskHandler.buildLaunchCommand('n', 't3.medium', 'us-east-1', '2h', false, '/s.sh', '', 0).contains('--attach-volume')
+    }
+
+    def 'parseVolumeSpecs maps ext.volumes maps to snap:mount:mode, read-only by default (#45)'() {
+        expect:
+        SpawnTaskHandler.parseVolumeSpecs([[snapshot: 'snap-aaa', mount: '/ref']]) == ['snap-aaa:/ref:ro']
+        SpawnTaskHandler.parseVolumeSpecs([[snapshot: 'snap-aaa', mount: '/ref', readOnly: false]]) == ['snap-aaa:/ref:rw']
+        SpawnTaskHandler.parseVolumeSpecs([[snapshot: 'snap-aaa', mount: '/ref', readOnly: true]]) == ['snap-aaa:/ref:ro']
+
+        and: 'a single map (not a list) is accepted'
+        SpawnTaskHandler.parseVolumeSpecs([snapshot: 'snap-xyz', mount: '/db']) == ['snap-xyz:/db:ro']
+
+        and: 'multiple volumes preserve order'
+        SpawnTaskHandler.parseVolumeSpecs([
+            [snapshot: 'snap-1', mount: '/a'],
+            [snapshot: 'snap-2', mount: '/b', readOnly: false],
+        ]) == ['snap-1:/a:ro', 'snap-2:/b:rw']
+
+        and: 'null / empty → no volumes'
+        SpawnTaskHandler.parseVolumeSpecs(null) == []
+        SpawnTaskHandler.parseVolumeSpecs([]) == []
+    }
+
+    def 'parseVolumeSpecs rejects entries missing snapshot or mount (#45)'() {
+        when:
+        SpawnTaskHandler.parseVolumeSpecs([[snapshot: 'snap-aaa']])
+
+        then:
+        thrown(nextflow.exception.AbortOperationException)
+    }
+
     def 'staging script syncs the S3 work dir down, runs the task, and syncs results back (#14)'() {
         given:
         def workDir = 's3://my-bucket/work/ab/cdef0123456789'

@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-13
+
+### Added
+- New `ext.volumes` process directive attaches pre-populated EBS data volumes
+  from snapshots to a task instance, each mounted at a path (read-only by
+  default). For example, mounting a Kraken2 reference DB without baking it into a
+  custom AMI:
+  ```groovy
+  process {
+      withName: 'KRAKEN2_KRAKEN2' {
+          ext.instanceType = 'r7g.2xlarge'
+          ext.volumes = [[ snapshot: 'snap-0abc', mount: '/opt/databases/kraken2', readOnly: true ]]
+      }
+  }
+  ```
+  Each entry maps to a `spawn launch --attach-volume snap-xxx:/mount[:ro|:rw]`.
+  `readOnly` defaults to `true`; a single map (one volume) is also accepted.
+  Requires spawn ≥ 0.46.0 (#45, depends on spawn#144).
+
 ## [0.2.12] - 2026-06-13
 
 ### Fixed
@@ -68,7 +87,8 @@ Baseline. Earlier history is in the
 
 ---
 
-[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.2.12...HEAD
+[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/spore-host/nf-spawn/compare/v0.2.12...v0.3.0
 [0.2.12]: https://github.com/spore-host/nf-spawn/compare/v0.2.11...v0.2.12
 [0.2.11]: https://github.com/spore-host/nf-spawn/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/spore-host/nf-spawn/compare/v0.2.9...v0.2.10
