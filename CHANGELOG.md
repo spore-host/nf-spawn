@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11] - 2026-06-13
+
+### Fixed
+- Declared `s3://` inputs are now actually copied onto the instance. Two bugs in
+  the generated stage-in commands meant the copy silently never happened: the
+  source URI was rendered with an empty bucket authority (`s3:///bucket/key`,
+  three slashes) so `aws s3 cp` parsed an empty bucket, and the destination
+  single-quoted the literal `${LOCAL_DIR}` so it was passed to `aws` unexpanded
+  (the file would have landed in a directory literally named `${LOCAL_DIR}`).
+  The URI is now repaired to `s3://bucket/key` and `${LOCAL_DIR}` is left outside
+  the quotes so the shell expands it (#41).
+- A failed input copy now fails the staging script loud (`|| exit 1`) instead of
+  being silently ignored under `set -uo pipefail`, which previously let the task
+  run with a missing input, "succeed" with no output, and then fail downstream
+  with a confusing `MissingFileException` (#41).
+
 ## [0.2.10] - 2026-06-13
 
 ### Fixed
@@ -40,7 +56,8 @@ Baseline. Earlier history is in the
 
 ---
 
-[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.2.10...HEAD
+[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.2.11...HEAD
+[0.2.11]: https://github.com/spore-host/nf-spawn/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/spore-host/nf-spawn/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/spore-host/nf-spawn/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/spore-host/nf-spawn/releases/tag/v0.2.8

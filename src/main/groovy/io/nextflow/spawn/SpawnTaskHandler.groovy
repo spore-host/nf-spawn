@@ -340,17 +340,18 @@ class SpawnTaskHandler extends TaskHandler {
         StringBuilder sb = new StringBuilder()
         sb << '# Localize declared inputs by source URI (#37 — they live outside this work dir).\n'
         inputs.each { String stageName, Path source ->
-            final uri = source.toUri().toString()
+            final uri = normalizeS3Uri(source.toUri().toString())
             if (!uri.startsWith('s3://')) {
                 // Non-S3 source (already local, or another provider) — the
                 // work-dir sync handles the common case; skip to avoid emitting
                 // a broken copy for a path that isn't reachable as-is.
                 return
             }
-            final dest = "\${LOCAL_DIR}/${stageName}"
             final destParent = stageName.contains('/') ? stageName.substring(0, stageName.lastIndexOf('/')) : ''
             if (destParent) {
-                sb << "mkdir -p ${shellQuote('${LOCAL_DIR}/' + destParent)}\n"
+                // ${LOCAL_DIR} must stay OUTSIDE the single quotes so the shell
+                // expands it; only the (untrusted) stage name is quoted (#41).
+                sb << "mkdir -p \"\${LOCAL_DIR}/\"${shellQuote(destParent)}\n"
             }
             // Directory inputs need `aws s3 cp --recursive`; a single-object cp
             // of a prefix would silently copy nothing. Detect a directory by the
@@ -368,10 +369,31 @@ class SpawnTaskHandler extends TaskHandler {
                 }
             }
             final recursive = isDir ? ' --recursive' : ''
-            sb << "aws s3 cp ${shellQuote(uri)} ${shellQuote(dest)} --region \"\${AWS_REGION}\"${recursive} --quiet\n"
+            // Dest: ${LOCAL_DIR} stays OUTSIDE the single quotes so it expands to
+            // /var/lib/nf-work; only the stage name is quoted (#41 bug 2). The
+            // copy is guarded so a failed input copy fails loud — the script runs
+            // `set -uo pipefail` (not -e), so an un-piped failed `aws s3 cp` would
+            // otherwise be silently ignored and the task would run with a missing
+            // input, "succeed" with no output, then fail downstream with a
+            // confusing MissingFileException (#41 silent-failure).
+            sb << "aws s3 cp ${shellQuote(uri)} \"\${LOCAL_DIR}/\"${shellQuote(stageName)} --region \"\${AWS_REGION}\"${recursive} --quiet || { echo \"nf-spawn: failed to stage input ${stageName} from ${uri}\" >&2; exit 1; }\n"
         }
         sb << '\n'
         return sb.toString()
+    }
+
+    // normalizeS3Uri repairs the malformed `s3:///bucket/key` (three slashes,
+    // empty authority) that nf-amazon's S3 Path renders from `toUri().toString()`
+    // — the bucket lands in the path instead of the authority, so `aws s3 cp`
+    // parses an empty bucket and the copy fails (#41 bug 1). Collapse a leading
+    // `s3:///` to `s3://` so the first path segment becomes the bucket. A
+    // well-formed `s3://bucket/key` is returned unchanged.
+    @groovy.transform.PackageScope
+    static String normalizeS3Uri(String uri) {
+        if (uri?.startsWith('s3:///')) {
+            return 's3://' + uri.substring('s3:///'.length())
+        }
+        return uri
     }
 
     // buildRunLine produces the line that executes .command.sh, capturing stdout
