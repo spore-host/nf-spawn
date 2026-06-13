@@ -338,10 +338,22 @@ class SpawnTaskHandler extends TaskHandler {
             if (destParent) {
                 sb << "mkdir -p ${shellQuote('${LOCAL_DIR}/' + destParent)}\n"
             }
-            // --recursive copies a directory input; for a single file it's a
-            // no-op-safe flag only if the source is a prefix, so branch on the
-            // trailing slash Nextflow uses for directory paths.
-            final recursive = uri.endsWith('/') ? ' --recursive' : ''
+            // Directory inputs need `aws s3 cp --recursive`; a single-object cp
+            // of a prefix would silently copy nothing. Detect a directory by the
+            // resolved Path (Files.isDirectory) — an s3:// directory input doesn't
+            // always render with a trailing slash, so the slash alone is
+            // unreliable (PR #38 review) — but ALSO honor a trailing slash, since
+            // that's unambiguously a directory even if the path can't be stat'd
+            // (provider not registered, etc.).
+            boolean isDir = uri.endsWith('/')
+            if (!isDir) {
+                try {
+                    isDir = Files.isDirectory(source)
+                } catch (Exception ignored) {
+                    // can't stat — leave as the trailing-slash verdict (false)
+                }
+            }
+            final recursive = isDir ? ' --recursive' : ''
             sb << "aws s3 cp ${shellQuote(uri)} ${shellQuote(dest)} --region \"\${AWS_REGION}\"${recursive} --quiet\n"
         }
         sb << '\n'
