@@ -73,6 +73,18 @@ class SpawnTaskHandler extends TaskHandler {
         // fail to write the work dir (#39).
         String runOptions = resolveDockerRunOptions(task)
 
+        // Bind-mount each ext.volumes mount path INTO the task container, at the
+        // same path. The volume is mounted on the host by `spawn launch
+        // --attach-volume`, but the task runs in Docker and would otherwise only
+        // see the work dir — so a reference DB at /opt/databases/x is invisible to
+        // the tool. Mounting it through (read-only when the volume is :ro) lets a
+        // `path`-input DB symlinked into the work dir resolve to the real bytes
+        // inside the container — zero copy (#49 / nf-spawn#51).
+        String volumeMounts = volumeBindMounts(ext.volumes)
+        if (volumeMounts) {
+            runOptions = (runOptions ? runOptions + ' ' : '') + volumeMounts
+        }
+
         // Resolve the per-task setup/bootstrap that runs BEFORE the task, so a
         // STOCK AL2023 AMI works without baking Docker/tools into a custom AMI
         // (#47): auto-ensure Docker when a container is used, plus `ext.packages`
@@ -302,6 +314,36 @@ class SpawnTaskHandler extends TaskHandler {
         return specs
     }
 
+    // volumeBindMounts turns the `ext.volumes` directive into `docker run -v`
+    // bind-mount flags so the host-attached reference volume(s) are visible
+    // INSIDE the task container at the same path — read-only when the volume is
+    // (`readOnly` default true). Mirrors parseVolumeSpecs' parsing but keys on the
+    // mount path, not the snapshot. Returns '' when there are no volumes (#49 /
+    // nf-spawn#51).
+    @groovy.transform.PackageScope
+    static String volumeBindMounts(Object volumes) {
+        if (!volumes) return ''
+        List rawList
+        if (volumes instanceof List) {
+            rawList = volumes as List
+        } else if (volumes instanceof Map) {
+            rawList = [volumes]
+        } else {
+            return ''
+        }
+        List<String> flags = []
+        for (Object o : rawList) {
+            if (!(o instanceof Map)) continue
+            Map m = o as Map
+            String mount = (m.mount ?: m.mountPoint ?: '') as String
+            if (!mount) continue
+            boolean readOnly = m.containsKey('readOnly') ? (m.readOnly ? true : false) : true
+            String suffix = readOnly ? ':ro' : ''
+            flags << "-v ${shellQuote(mount + ':' + mount + suffix)}".toString()
+        }
+        return flags.join(' ')
+    }
+
     // buildStagingScript produces the instance user-data script that returns
     // task results to Nextflow (#14). The flow is:
     //   1. sync the S3 work dir down to a local dir (inputs Nextflow staged),
@@ -469,9 +511,28 @@ class SpawnTaskHandler extends TaskHandler {
         inputs.each { String stageName, Path source ->
             final uri = normalizeS3Uri(source.toUri().toString())
             if (!uri.startsWith('s3://')) {
-                // Non-S3 source (already local, or another provider) — the
-                // work-dir sync handles the common case; skip to avoid emitting
-                // a broken copy for a path that isn't reachable as-is.
+                // A LOCAL absolute path (file:// or a bare path). The common case
+                // that matters here: an `ext.volumes` reference DB mounted
+                // read-only at that path on the task (e.g. /opt/databases/kraken2).
+                // A task `path` input is referenced by its STAGE NAME in the work
+                // dir, not the absolute path (e.g. nf-core's metaphlan does
+                // `find -L metaphlan_db ...`), so we must make the stage name
+                // resolve. Symlink stage name → the mounted path (the spawn
+                // equivalent of Nextflow's stageInMode=symlink on a shared FS),
+                // so the tool reads the DB straight off the read-only volume —
+                // zero copy, zero per-task download (#49 / nf-spawn#51).
+                //
+                // Guarded by an existence test: if the path isn't present on the
+                // task (no matching volume), we skip rather than make a dangling
+                // link — the work-dir sync still handles a genuinely-local file.
+                final localPath = localAbsolutePath(uri)
+                if (localPath) {
+                    final destParent = stageName.contains('/') ? stageName.substring(0, stageName.lastIndexOf('/')) : ''
+                    if (destParent) {
+                        sb << "mkdir -p \"\${LOCAL_DIR}/\"${shellQuote(destParent)}\n"
+                    }
+                    sb << "if [ -e ${shellQuote(localPath)} ]; then ln -sfn ${shellQuote(localPath)} \"\${LOCAL_DIR}/\"${shellQuote(stageName)}; fi\n"
+                }
                 return
             }
             final destParent = stageName.contains('/') ? stageName.substring(0, stageName.lastIndexOf('/')) : ''
@@ -521,6 +582,26 @@ class SpawnTaskHandler extends TaskHandler {
             return 's3://' + uri.substring('s3:///'.length())
         }
         return uri
+    }
+
+    // localAbsolutePath extracts a local absolute filesystem path from an input
+    // URI, or '' if the URI isn't a usable local absolute path. Accepts a
+    // `file://` URI (the common rendering of a local Path) or a bare absolute
+    // path. Anything relative, empty, or another scheme (already handled as s3://
+    // upstream) yields '' so the caller skips it (#49 / nf-spawn#51).
+    @groovy.transform.PackageScope
+    static String localAbsolutePath(String uri) {
+        if (!uri) return ''
+        String p = uri
+        if (p.startsWith('file://')) {
+            // file:///opt/x → /opt/x ; tolerate a stray authority (file://host/…)
+            p = p.substring('file://'.length())
+            int slash = p.indexOf('/')
+            if (slash > 0) {
+                p = p.substring(slash)   // drop any authority before the first '/'
+            }
+        }
+        return p.startsWith('/') ? p : ''
     }
 
     // buildRunLine produces the line that executes .command.sh, capturing stdout
