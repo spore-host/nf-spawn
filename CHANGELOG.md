@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- Added a **Delivering reference data** section to the README explaining which
+  data-delivery model fits which pipeline style: `ext.volumes` is for data a
+  process reads directly from a fixed mount path, and does **not** work for an
+  nf-core staged `path` input (e.g. taxprofiler's `db_path`) — the pipeline
+  validates the path on the head node and stages the input itself, neither of
+  which a task-only volume mount can satisfy. For staged-input DBs, an `s3://`
+  `db_path` (localized per-task via #37) is the recommended pattern (#49).
+
 ## [0.4.0] - 2026-06-13
 
 ### Added
