@@ -73,9 +73,15 @@ class SpawnTaskHandler extends TaskHandler {
         // fail to write the work dir (#39).
         String runOptions = resolveDockerRunOptions(task)
 
+        // Resolve the per-task setup/bootstrap that runs BEFORE the task, so a
+        // STOCK AL2023 AMI works without baking Docker/tools into a custom AMI
+        // (#47): auto-ensure Docker when a container is used, plus `ext.packages`
+        // (dnf install) and an arbitrary `ext.setup` command.
+        String setup = buildSetupScript(ext, container)
+
         // Write the staging script to a temp file shipped as instance user-data.
         Path scriptFile = Files.createTempFile("nf-spawn-${instanceName}-", ".sh")
-        scriptFile.toFile().text = buildStagingScript(workDirUri, region, task.script, container, task.getInputFilesMap(), runOptions)
+        scriptFile.toFile().text = buildStagingScript(workDirUri, region, task.script, container, task.getInputFilesMap(), runOptions, setup)
         scriptFile.toFile().setExecutable(true)
 
         // Build the spawn launch command
@@ -312,8 +318,68 @@ class SpawnTaskHandler extends TaskHandler {
     // role carries S3 access). scp-before-terminate was rejected: it is lossy
     // under --on-complete terminate, whereas S3 sync is idempotent and
     // object-atomic.
+    // buildSetupScript assembles the per-task bootstrap that runs before staging,
+    // so a STOCK AL2023 AMI can run containerized nf-core tasks without baking
+    // Docker/tools into a custom AMI (#47). It composes three layers, each
+    // optional and skippable, in this order:
+    //
+    //   1. Auto-ensure Docker — when the process has a `container` directive
+    //      (nf-spawn runs it via `docker run`), install + start Docker if it's
+    //      not already present. Stock AL2023 has the AWS CLI but no Docker. This
+    //      is idempotent (skips when `docker` is on PATH, so a pre-baked AMI pays
+    //      nothing) and can be turned off with `ext.ensureDocker = false` for
+    //      users who bake their own tools AMI and want zero per-task install.
+    //   2. `ext.packages = ['pigz', ...]` → `dnf install -y` of host tools the
+    //      task calls directly on the instance.
+    //   3. `ext.setup = '<shell>'` → an arbitrary bootstrap command, run last.
+    //
+    // Returns '' when there's nothing to do (e.g. no container + no packages/setup).
     @groovy.transform.PackageScope
-    static String buildStagingScript(String workDirUri, String region, String taskScript, String container, Map<String, Path> inputs = [:], String runOptions = '') {
+    static String buildSetupScript(Map ext, String container) {
+        StringBuilder sb = new StringBuilder()
+
+        // 1. Docker — only when there's a container to run, and not opted out.
+        boolean ensureDocker = ext.containsKey('ensureDocker') ? (ext.ensureDocker ? true : false) : true
+        if (container?.trim() && ensureDocker) {
+            sb << '# nf-spawn: ensure Docker (stock AL2023 has none) — idempotent (#47)\n'
+            sb << 'if ! command -v docker >/dev/null 2>&1; then\n'
+            sb << '  echo "nf-spawn: installing Docker..." >&2\n'
+            sb << '  sudo dnf install -y docker || { echo "nf-spawn: docker install failed" >&2; exit 1; }\n'
+            sb << 'fi\n'
+            sb << 'sudo systemctl enable --now docker 2>/dev/null || sudo systemctl start docker || { echo "nf-spawn: could not start docker" >&2; exit 1; }\n'
+        }
+
+        // 2. ext.packages → dnf install.
+        List<String> packages = parsePackages(ext.packages)
+        if (packages) {
+            String quoted = packages.collect { shellQuote(it) }.join(' ')
+            sb << "# nf-spawn: install requested packages (#47)\n"
+            sb << "sudo dnf install -y ${quoted} || { echo \"nf-spawn: package install failed\" >&2; exit 1; }\n"
+        }
+
+        // 3. ext.setup → arbitrary bootstrap, last.
+        String setup = (ext.setup ?: ext.command ?: '') as String
+        if (setup?.trim()) {
+            sb << "# nf-spawn: ext.setup (#47)\n"
+            sb << setup.trim() << '\n'
+        }
+
+        return sb.toString()
+    }
+
+    // parsePackages normalizes `ext.packages` into a list of package names. Accepts
+    // a List or a single String (space/comma-separated). Null/empty → [].
+    @groovy.transform.PackageScope
+    static List<String> parsePackages(Object packages) {
+        if (!packages) return []
+        if (packages instanceof List) {
+            return (packages as List).collect { (it as String).trim() }.findAll { it }
+        }
+        return (packages as String).split(/[,\s]+/).collect { it.trim() }.findAll { it }
+    }
+
+    @groovy.transform.PackageScope
+    static String buildStagingScript(String workDirUri, String region, String taskScript, String container, Map<String, Path> inputs = [:], String runOptions = '', String setup = '') {
         StringBuilder sb = new StringBuilder('#!/bin/bash\n')
         sb << 'set -uo pipefail\n\n'
         sb << "WORKDIR_S3=${shellQuote(workDirUri)}\n"
@@ -331,6 +397,13 @@ class SpawnTaskHandler extends TaskHandler {
         // container's user can write regardless of whether --user is set. (The
         // dir is on an ephemeral instance that's terminated after the task.)
         sb << 'chmod 0777 "${LOCAL_DIR}"\n'
+
+        // 0. Per-task setup, BEFORE staging/running — installs Docker + any host
+        //    tools so a STOCK AL2023 AMI works without a custom tools-baked AMI
+        //    (#47). Idempotent (skip-if-present); empty when nothing to do.
+        if (setup) {
+            sb << '\n' << setup
+        }
 
         // 1a. Sync this task's own S3 work dir down (.command.sh metadata etc.).
         sb << 'aws s3 sync "${WORKDIR_S3}" "${LOCAL_DIR}/" --region "${AWS_REGION}" --quiet\n'
