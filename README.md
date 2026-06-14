@@ -89,7 +89,7 @@ workDir = 's3://my-bucket/nextflow-work'
 | `ext.spot` | `false` | Launch as a Spot instance |
 | `ext.ami` | _(auto)_ | Explicit AMI ID; omit to let spawn auto-detect a stock AMI |
 | `ext.volumeSize` | _(AMI min)_ | Extra root EBS size in GiB beyond the AMI minimum |
-| `ext.volumes` | _(none)_ | List of `[snapshot:, mount:, readOnly:]` maps — attach EBS data volumes from snapshots (read-only by default). For data a process reads **directly from the mount path**, not for staged `path` inputs — see [Delivering reference data](#delivering-reference-data). Requires spawn ≥ 0.46.0 |
+| `ext.volumes` | _(none)_ | List of `[snapshot:, mount:, readOnly:]` maps — attach EBS data volumes from snapshots (read-only by default), bind-mounted into the task container. Works for both direct reads and staged `path` inputs (symlinked, zero-copy) — see [Delivering reference data](#delivering-reference-data). Requires spawn ≥ 0.46.0 |
 | `ext.ensureDocker` | `true` | Auto-install + start Docker on the task instance when a `container` is set (idempotent), so a stock AMI works. Set `false` if your AMI already has Docker |
 | `ext.packages` | _(none)_ | Host packages to `dnf install` before the task — a list (`['pigz','ethtool']`) or a space/comma string. For tools the task calls on the instance |
 | `ext.setup` | _(none)_ | Arbitrary shell command run on the instance before the task (after Docker/packages) |
@@ -100,32 +100,35 @@ workDir = 's3://my-bucket/nextflow-work'
 
 ### Delivering reference data
 
-Large reference data (a Kraken2/MetaPhlAn DB, BLAST index) reaches a task one of
-two ways, and they fit **different pipeline styles**. Choose by how the process
-consumes the data:
+Large reference data (a Kraken2/MetaPhlAn DB, BLAST index) reaches a task two
+ways. Prefer **`ext.volumes`** — it's read straight off an attached read-only
+snapshot with **zero copy and zero per-task download**.
 
-**1. `ext.volumes` — for data read directly from a fixed mount path.**
-The DB lives on an EBS snapshot, attached read-only at a known path. The process
-must reference that path itself (a tool you invoke with `--db /opt/databases/x`,
-or your own staging logic). It is *not* staged by Nextflow.
+**1. `ext.volumes` — a read-only snapshot, mounted (recommended).**
+The DB lives on an EBS snapshot (`spawn snapshot create`), attached read-only at
+a known path. nf-spawn now makes this work for **both** ways a process consumes
+the data:
 
-> ⚠️ `ext.volumes` does **not** work for an nf-core **staged `path` input** (the
-> usual `db_path` pattern, e.g. taxprofiler's `databases.csv`). Two reasons,
-> both outside nf-spawn's control:
-> - The pipeline validates `db_path` **on the head node** at init (before any
->   task launches). A volume mounts on the **task**, not the head, so the path
->   doesn't exist there and validation aborts the run.
-> - Even past validation, a `path` input is **staged by Nextflow** (head → task
->   work dir). There's no way to tell a module "this input is already at the
->   mount, don't stage it." The staged copy and the mount collide.
+- **Direct reads** — a tool you invoke yourself with `--db /opt/databases/x`
+  reads the mount directly.
+- **Staged `path` inputs** — the nf-core `db_path` pattern (e.g. taxprofiler's
+  `databases.csv`). nf-spawn **symlinks** the input's stage name in the work dir
+  to the mount path (the spawn equivalent of Nextflow's `stageInMode=symlink`),
+  and **bind-mounts** the volume into the task container, so a tool that does
+  `find -L <db>` resolves to the read-only volume — no copy.
 
-**2. An `s3://` `db_path` — for staged `path` inputs (the nf-core norm).**
-If the pipeline accepts an `s3://` URI as the DB input, nf-spawn's declared-input
-localization (#37) `aws s3 cp`s it onto each task automatically — no volume, no
-head-side path. This is the recommended pattern for staged-input DBs. The
-trade-off is that each task downloads the DB (16–34 GB), so it suits modest
-fan-out; `ext.volumes` is the better fit only when the process reads the data
-directly from the mount.
+  > For a staged-input pipeline, also **attach the same read-only snapshot on the
+  > head node** at the same path. nf-core pipelines validate `db_path` exists on
+  > the head at init (before any task launches); a head mount satisfies that
+  > **with no pipeline fork**. (Validation runs on the head, which nf-spawn can't
+  > reach — so the head mount is the piece you provide.)
+
+**2. An `s3://` `db_path` — download-per-task fallback.**
+If you can't mount on the head (or don't want to), point `db_path` at an `s3://`
+URI: nf-spawn's declared-input localization (#37) `aws s3 cp`s it onto each task,
+and an `s3://` URI also skips nf-core's head-side existence check. The trade-off
+is that **every task downloads the full DB (16–34 GB)** — wasteful for anything
+beyond small fan-out. Prefer option 1.
 
 ## Example pipeline
 

@@ -396,7 +396,7 @@ class SpawnTaskHandlerTest extends Specification {
         cpIdx > mkdirIdx
     }
 
-    def 'non-s3 inputs are not given a copy command (left to the work-dir sync) (#37)'() {
+    def 'non-s3 inputs are never aws-s3-copied (#37)'() {
         given:
         def inputs = ['local.txt': s3Path('file:///some/local/path.txt')] as Map<String, java.nio.file.Path>
 
@@ -405,6 +405,50 @@ class SpawnTaskHandlerTest extends Specification {
 
         then: 'no aws s3 cp for a non-s3 source'
         !script.contains("aws s3 cp 'file://")
+    }
+
+    def 'a local path input is symlinked into the work dir when present on the task (#51)'() {
+        given: 'a path input whose source is a local absolute path — e.g. an ext.volumes DB mount'
+        def inputs = ['metaphlan_db': s3Path('file:///opt/databases/metaphlan')] as Map<String, java.nio.file.Path>
+
+        when:
+        def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'metaphlan', '', inputs)
+
+        then: 'the stage name is symlinked to the mount path, guarded by an existence test — no copy'
+        script.contains('if [ -e \'/opt/databases/metaphlan\' ]; then ln -sfn \'/opt/databases/metaphlan\' "${LOCAL_DIR}/"\'metaphlan_db\'; fi')
+
+        and: 'the input itself is not aws-s3-copied (only the .exitcode upload uses aws s3 cp)'
+        !script.contains("aws s3 cp 'file://")
+        !script.contains('metaphlan_db --region')
+    }
+
+    def 'localAbsolutePath extracts a usable local path or returns empty (#51)'() {
+        expect:
+        SpawnTaskHandler.localAbsolutePath('file:///opt/databases/metaphlan') == '/opt/databases/metaphlan'
+        SpawnTaskHandler.localAbsolutePath('/opt/databases/kraken2') == '/opt/databases/kraken2'
+        SpawnTaskHandler.localAbsolutePath('file:///x') == '/x'
+
+        and: 'relative / empty / non-absolute → empty (caller skips)'
+        SpawnTaskHandler.localAbsolutePath('relative/path') == ''
+        SpawnTaskHandler.localAbsolutePath('') == ''
+        SpawnTaskHandler.localAbsolutePath(null) == ''
+    }
+
+    def 'ext.volumes mount paths are bind-mounted into the task container (#51)'() {
+        expect:
+        SpawnTaskHandler.volumeBindMounts([[snapshot: 'snap-a', mount: '/opt/databases/metaphlan']]) ==
+            "-v '/opt/databases/metaphlan:/opt/databases/metaphlan:ro'"
+
+        and: 'read-write volume drops the :ro suffix'
+        SpawnTaskHandler.volumeBindMounts([[snapshot: 'snap-a', mount: '/data', readOnly: false]]) ==
+            "-v '/data:/data'"
+
+        and: 'multiple volumes; null → empty'
+        SpawnTaskHandler.volumeBindMounts([
+            [snapshot: 'snap-a', mount: '/a'],
+            [snapshot: 'snap-b', mount: '/b', readOnly: false],
+        ]) == "-v '/a:/a:ro' -v '/b:/b'"
+        SpawnTaskHandler.volumeBindMounts(null) == ''
     }
 
     def 'a malformed s3:/// source (empty authority) is repaired to s3:// (#41 bug 1)'() {

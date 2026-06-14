@@ -8,14 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-14
+
+### Added
+- `ext.volumes` reference data now works with **staged `path` inputs** (the
+  nf-core `db_path` pattern, e.g. taxprofiler), not just data a process reads
+  directly from the mount — with **zero copy and zero per-task download** (#51,
+  follow-up to #49):
+  - A declared `path` input whose source is a **local absolute path** that exists
+    on the task (i.e. an `ext.volumes` mount) is now **symlinked** into the work
+    dir under the stage name the task script references — instead of being
+    skipped. This is the spawn equivalent of Nextflow's `stageInMode=symlink` on
+    a shared filesystem, so a tool that does `find -L <stage_name>` resolves
+    straight to the read-only volume.
+  - Each `ext.volumes` mount path is now **bind-mounted into the task container**
+    (read-only when the volume is), so a containerized tool can actually read the
+    DB off the mount.
+  Combined with attaching the same read-only snapshot on the **head node** (so
+  the pipeline's head-side `exists` validation passes), an unmodified nf-core
+  pipeline can be fed a volume-backed DB — no pipeline fork, no per-task download.
+
 ### Documentation
-- Added a **Delivering reference data** section to the README explaining which
-  data-delivery model fits which pipeline style: `ext.volumes` is for data a
-  process reads directly from a fixed mount path, and does **not** work for an
-  nf-core staged `path` input (e.g. taxprofiler's `db_path`) — the pipeline
-  validates the path on the head node and stages the input itself, neither of
-  which a task-only volume mount can satisfy. For staged-input DBs, an `s3://`
-  `db_path` (localized per-task via #37) is the recommended pattern (#49).
+- Added a **Delivering reference data** section to the README covering the two
+  models (`ext.volumes` for mount-backed DBs incl. staged `path` inputs, and an
+  `s3://` `db_path` for the download-per-task fallback) and the head-node-mount
+  step that satisfies head-side schema validation (#49, #51).
 
 ## [0.4.0] - 2026-06-13
 
@@ -113,7 +130,8 @@ Baseline. Earlier history is in the
 
 ---
 
-[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/spore-host/nf-spawn/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/spore-host/nf-spawn/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/spore-host/nf-spawn/compare/v0.2.12...v0.3.0
 [0.2.12]: https://github.com/spore-host/nf-spawn/compare/v0.2.11...v0.2.12
