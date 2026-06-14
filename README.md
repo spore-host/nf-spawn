@@ -117,11 +117,24 @@ the data:
   and **bind-mounts** the volume into the task container, so a tool that does
   `find -L <db>` resolves to the read-only volume — no copy.
 
-  > For a staged-input pipeline, also **attach the same read-only snapshot on the
-  > head node** at the same path. nf-core pipelines validate `db_path` exists on
-  > the head at init (before any task launches); a head mount satisfies that
-  > **with no pipeline fork**. (Validation runs on the head, which nf-spawn can't
-  > reach — so the head mount is the piece you provide.)
+  > **The head node also needs the DB at that path.** nf-core pipelines validate
+  > `db_path` exists on the head at init (before any task launches); satisfying it
+  > needs **no pipeline fork**, just the snapshot mounted there too. How depends on
+  > where you run `nextflow run`:
+  >
+  > - **Head is itself a spawn-launched EC2 instance** (e.g. you launch the
+  >   controller with `spawn launch … --attach-volume snap-xxx:/opt/databases/x`):
+  >   **nothing to do.** spawn's attached-volume user-data `mkdir -p`s the mount
+  >   point and mounts the volume read-only on the head automatically — the same
+  >   code path as the tasks. This is the easy case.
+  > - **Head is a laptop / non-spawn box:** attach + mount it yourself once —
+  >   `spawn snapshot mount snap-xxx /opt/databases/x` (convenience for an EC2
+  >   head), or the manual `aws ec2 create-volume --snapshot-id … && attach-volume
+  >   … && sudo mount -o ro …`. (A laptop can't attach EBS at all, so run the head
+  >   on a small EC2 box, or use option 2 below.)
+  >
+  > Either way the mount-point directory is created for you on spawn-launched
+  > instances; you never pre-create it.
 
 **2. An `s3://` `db_path` — download-per-task fallback.**
 If you can't mount on the head (or don't want to), point `db_path` at an `s3://`
