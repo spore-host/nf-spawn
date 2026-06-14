@@ -90,6 +90,13 @@ workDir = 's3://my-bucket/nextflow-work'
 | `ext.ami` | _(auto)_ | Explicit AMI ID; omit to let spawn auto-detect a stock AMI |
 | `ext.volumeSize` | _(AMI min)_ | Extra root EBS size in GiB beyond the AMI minimum |
 | `ext.volumes` | _(none)_ | List of `[snapshot:, mount:, readOnly:]` maps — attach EBS data volumes from snapshots (read-only by default). Requires spawn ≥ 0.46.0 |
+| `ext.ensureDocker` | `true` | Auto-install + start Docker on the task instance when a `container` is set (idempotent), so a stock AMI works. Set `false` if your AMI already has Docker |
+| `ext.packages` | _(none)_ | Host packages to `dnf install` before the task — a list (`['pigz','ethtool']`) or a space/comma string. For tools the task calls on the instance |
+| `ext.setup` | _(none)_ | Arbitrary shell command run on the instance before the task (after Docker/packages) |
+
+> With `ext.volumes` + the setup hooks above, nf-spawn runs on a **stock AL2023
+> AMI** — no custom AMI needed. For wide fan-out, a small pre-baked tools AMI
+> avoids the per-task install latency.
 
 ## Example pipeline
 

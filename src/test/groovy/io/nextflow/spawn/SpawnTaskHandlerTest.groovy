@@ -203,6 +203,68 @@ class SpawnTaskHandlerTest extends Specification {
         line.contains('-w "${LOCAL_DIR}" \'biocontainers/fastqc:0.12.1--hdfd78af_0\'')
     }
 
+    def 'auto-ensures Docker when a container is set, idempotently (#47)'() {
+        when:
+        def setup = SpawnTaskHandler.buildSetupScript([:], 'biocontainers/fastqc:0.12.1--hdfd78af_0')
+
+        then: 'installs docker only if absent, then starts it'
+        setup.contains('command -v docker')
+        setup.contains('dnf install -y docker')
+        setup.contains('systemctl')
+    }
+
+    def 'does not install Docker when there is no container (#47)'() {
+        expect:
+        SpawnTaskHandler.buildSetupScript([:], '') == ''
+        SpawnTaskHandler.buildSetupScript([:], null) == ''
+    }
+
+    def 'ext.ensureDocker=false opts out of the Docker install (#47)'() {
+        when:
+        def setup = SpawnTaskHandler.buildSetupScript([ensureDocker: false], 'some/image:1')
+
+        then: 'no docker install even though a container is set (pre-baked tools AMI)'
+        !setup.contains('dnf install -y docker')
+    }
+
+    def 'ext.packages installs host tools via dnf (#47)'() {
+        when:
+        def setup = SpawnTaskHandler.buildSetupScript([packages: ['pigz', 'ethtool']], '')
+
+        then:
+        setup.contains("dnf install -y 'pigz' 'ethtool'")
+    }
+
+    def 'ext.setup runs an arbitrary bootstrap last (#47)'() {
+        when:
+        def setup = SpawnTaskHandler.buildSetupScript([setup: 'echo hi && do_thing'], 'img:1')
+
+        then: 'the arbitrary command is included, after the docker ensure'
+        setup.contains('echo hi && do_thing')
+        setup.indexOf('docker') < setup.indexOf('echo hi && do_thing')
+    }
+
+    def 'parsePackages accepts a list or a delimited string (#47)'() {
+        expect:
+        SpawnTaskHandler.parsePackages(['pigz', 'ethtool']) == ['pigz', 'ethtool']
+        SpawnTaskHandler.parsePackages('pigz ethtool') == ['pigz', 'ethtool']
+        SpawnTaskHandler.parsePackages('pigz, ethtool') == ['pigz', 'ethtool']
+        SpawnTaskHandler.parsePackages(null) == []
+        SpawnTaskHandler.parsePackages('') == []
+    }
+
+    def 'staging script runs setup before the work-dir sync and the task (#47)'() {
+        when:
+        def setup = SpawnTaskHandler.buildSetupScript([:], 'img:1')
+        def script = SpawnTaskHandler.buildStagingScript(
+            's3://b/work/aa/bb', 'us-east-1', 'run', 'img:1', [:], '', setup)
+
+        then: 'docker is ensured before inputs are synced and before the task runs'
+        script.contains('dnf install -y docker')
+        script.indexOf('dnf install -y docker') < script.indexOf('aws s3 sync "${WORKDIR_S3}"')
+        script.indexOf('dnf install -y docker') < script.indexOf('bash .command.sh')
+    }
+
     def 'staging script makes the work dir world-writable and honors run options (#39)'() {
         when:
         def script = SpawnTaskHandler.buildStagingScript(

@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-13
+
+### Added
+- Per-task setup hook so a **stock AL2023 AMI** runs containerized tasks without
+  baking Docker/tools into a custom AMI (#47):
+  - **Docker is auto-ensured** when a process has a `container` directive —
+    nf-spawn installs and starts Docker on the task instance if it isn't already
+    present (idempotent; a pre-baked AMI with Docker pays nothing). Opt out with
+    `ext.ensureDocker = false` if you maintain your own tools AMI.
+  - **`ext.packages = ['pigz', 'ethtool']`** installs host tools the task calls
+    directly on the instance (via `dnf`). Accepts a list or a space/comma string.
+  - **`ext.setup = '<shell>'`** runs an arbitrary bootstrap command before the
+    task (runs after the Docker/packages steps).
+  Combined with `ext.volumes` (0.3.0), the full **stock AMI + DB-on-EBS +
+  tools-at-launch** setup is now reachable — no custom AMI required. (For wide
+  fan-out, a small pre-baked tools AMI is still the lower-latency option.)
+
 ## [0.3.0] - 2026-06-13
 
 ### Added
@@ -87,7 +104,8 @@ Baseline. Earlier history is in the
 
 ---
 
-[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/spore-host/nf-spawn/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/spore-host/nf-spawn/compare/v0.2.12...v0.3.0
 [0.2.12]: https://github.com/spore-host/nf-spawn/compare/v0.2.11...v0.2.12
 [0.2.11]: https://github.com/spore-host/nf-spawn/compare/v0.2.10...v0.2.11
