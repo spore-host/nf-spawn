@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `ext.az` directive: pin a task's instance to a specific availability zone,
+  forwarded to `spawn launch --az <zone>` (#62). Needed for **Fast Snapshot
+  Restore**, which is per-AZ — a volume created from an FSR-warmed snapshot is
+  only fast-restored in the AZ where FSR is enabled; elsewhere it lazy-loads
+  blocks from S3 (~6–8 MB/s), e.g. ~40 min to load a 16 GB Kraken2 DB. Passed
+  only when set, so the default preserves spawn's own placement.
+
 ### Security
 - Semgrep SAST is now **enforcing** in CI (`--config=auto --error`) rather than
   report-only (#368). The scan (Groovy) was already clean — no findings to triage.

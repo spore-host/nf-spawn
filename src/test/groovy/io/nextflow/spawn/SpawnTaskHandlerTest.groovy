@@ -85,6 +85,21 @@ class SpawnTaskHandlerTest extends Specification {
         !SpawnTaskHandler.buildLaunchCommand('n', 't3.medium', 'us-east-1', '2h', false, '/s.sh', '', 0).contains('--attach-volume')
     }
 
+    def 'passes --az only when ext.az is set, to pin FSR placement (#62)'() {
+        when:
+        def withAz = SpawnTaskHandler.buildLaunchCommand(
+            'n', 't3.medium', 'us-east-1', '2h', false, '/s.sh', '', 0, [], 'us-east-1a')
+        def withoutAz = SpawnTaskHandler.buildLaunchCommand(
+            'n', 't3.medium', 'us-east-1', '2h', false, '/s.sh', '', 0)
+
+        then: 'an explicit AZ is forwarded as --az <zone>'
+        withAz.contains('--az')
+        withAz[withAz.indexOf('--az') + 1] == 'us-east-1a'
+
+        and: 'no --az when unset, so spawn keeps its own placement (back-compat default)'
+        !withoutAz.contains('--az')
+    }
+
     def 'parseVolumeSpecs maps ext.volumes maps to snap:mount:mode, read-only by default (#45)'() {
         expect:
         SpawnTaskHandler.parseVolumeSpecs([[snapshot: 'snap-aaa', mount: '/ref']]) == ['snap-aaa:/ref:ro']
