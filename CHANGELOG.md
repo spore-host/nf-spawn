@@ -8,7 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-06-14
+## [0.6.0] - 2026-06-14
+
+### Fixed
+- `ext.volumes` is now genuinely zero-copy for pipelines that **stage** their
+  `path` DB input (e.g. nf-core/taxprofiler copies `db_path` into the Nextflow
+  S3 work area). Previously, 0.5.0 only symlinked an input whose *source URI* was
+  the local mount — but a staged input's source is Nextflow's own S3 stage copy,
+  never the mount, so nf-spawn fell back to `aws s3 cp` and **downloaded the DB
+  per task** (the volume was bind-mounted but unused). A 16 GB DB happened to
+  copy fine; a 36 GB one truncated and the tool failed. nf-spawn now matches a
+  declared input's **stage-name basename** against the attached `ext.volumes`
+  mounts and, on a match, **symlinks the stage name → the mount and skips the
+  copy** regardless of the reported source URI. So a volume-backed reference DB
+  (Kraken2, MetaPhlAn, …) is read straight off the read-only volume — no
+  per-task download — even when the pipeline stages `db_path` (#55).
 
 ### Added
 - `ext.volumes` reference data now works with **staged `path` inputs** (the
@@ -130,7 +144,8 @@ Baseline. Earlier history is in the
 
 ---
 
-[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/spore-host/nf-spawn/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/spore-host/nf-spawn/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/spore-host/nf-spawn/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/spore-host/nf-spawn/compare/v0.2.12...v0.3.0

@@ -91,9 +91,15 @@ class SpawnTaskHandler extends TaskHandler {
         // (dnf install) and an arbitrary `ext.setup` command.
         String setup = buildSetupScript(ext, container)
 
+        // The ext.volumes mount paths — a declared `path` input whose stage name
+        // matches a mount basename is symlinked to the mount instead of copied,
+        // so a pipeline that STAGES its db_path (e.g. taxprofiler copies it into
+        // the S3 work area) still reads the DB zero-copy off the volume (#55).
+        List<String> mountPaths = volumeMountPaths(ext.volumes)
+
         // Write the staging script to a temp file shipped as instance user-data.
         Path scriptFile = Files.createTempFile("nf-spawn-${instanceName}-", ".sh")
-        scriptFile.toFile().text = buildStagingScript(workDirUri, region, task.script, container, task.getInputFilesMap(), runOptions, setup)
+        scriptFile.toFile().text = buildStagingScript(workDirUri, region, task.script, container, task.getInputFilesMap(), runOptions, setup, mountPaths)
         scriptFile.toFile().setExecutable(true)
 
         // Build the spawn launch command
@@ -344,6 +350,45 @@ class SpawnTaskHandler extends TaskHandler {
         return flags.join(' ')
     }
 
+    // volumeMountPaths extracts just the mount paths from `ext.volumes`
+    // (e.g. ["/opt/databases/metaphlan", "/opt/databases/kraken2"]). Used to
+    // match a declared input's stage name against an attached reference volume so
+    // we can symlink to the mount instead of copying the (possibly huge) DB that
+    // Nextflow staged into the S3 work area (#55).
+    @groovy.transform.PackageScope
+    static List<String> volumeMountPaths(Object volumes) {
+        if (!volumes) return []
+        List rawList
+        if (volumes instanceof List) {
+            rawList = volumes as List
+        } else if (volumes instanceof Map) {
+            rawList = [volumes]
+        } else {
+            return []
+        }
+        List<String> mounts = []
+        for (Object o : rawList) {
+            if (!(o instanceof Map)) continue
+            Map m = o as Map
+            String mount = (m.mount ?: m.mountPoint ?: '') as String
+            if (mount) mounts << mount
+        }
+        return mounts
+    }
+
+    // baseName returns the last path segment of p (trailing slashes ignored),
+    // e.g. "/opt/databases/metaphlan" -> "metaphlan", "kraken2" -> "kraken2".
+    @groovy.transform.PackageScope
+    static String baseName(String p) {
+        if (!p) return ''
+        String s = p
+        while (s.length() > 1 && s.endsWith('/')) {
+            s = s.substring(0, s.length() - 1)
+        }
+        int i = s.lastIndexOf('/')
+        return i >= 0 ? s.substring(i + 1) : s
+    }
+
     // buildStagingScript produces the instance user-data script that returns
     // task results to Nextflow (#14). The flow is:
     //   1. sync the S3 work dir down to a local dir (inputs Nextflow staged),
@@ -421,7 +466,7 @@ class SpawnTaskHandler extends TaskHandler {
     }
 
     @groovy.transform.PackageScope
-    static String buildStagingScript(String workDirUri, String region, String taskScript, String container, Map<String, Path> inputs = [:], String runOptions = '', String setup = '') {
+    static String buildStagingScript(String workDirUri, String region, String taskScript, String container, Map<String, Path> inputs = [:], String runOptions = '', String setup = '', List<String> mountPaths = []) {
         StringBuilder sb = new StringBuilder('#!/bin/bash\n')
         sb << 'set -uo pipefail\n\n'
         sb << "WORKDIR_S3=${shellQuote(workDirUri)}\n"
@@ -457,7 +502,7 @@ class SpawnTaskHandler extends TaskHandler {
         // (often s3://) — so the work-dir sync above never pulls them, and stock
         // nf-core modules run with their inputs missing (#37). Copy each declared
         // input from its source to the local stage name it's referenced by.
-        sb << buildInputStaging(inputs)
+        sb << buildInputStaging(inputs, mountPaths)
 
         // 2. Materialize and run the task script; capture streams + real exit code.
         //    The script is written flush-left (common leading indentation stripped)
@@ -504,11 +549,33 @@ class SpawnTaskHandler extends TaskHandler {
     // Idempotent and best-effort per file; a stage name may include subdirs
     // (Nextflow allows `path`d inputs under a relative dir), so we mkdir -p first.
     @groovy.transform.PackageScope
-    static String buildInputStaging(Map<String, Path> inputs) {
+    static String buildInputStaging(Map<String, Path> inputs, List<String> mountPaths = []) {
         if (!inputs) return ''
+        // Index ext.volumes mounts by basename, for the #55 short-circuit below.
+        Map<String, String> mountByBase = [:]
+        for (String mp : (mountPaths ?: [])) {
+            String b = baseName(mp)
+            if (b) mountByBase[b] = mp
+        }
         StringBuilder sb = new StringBuilder()
         sb << '# Localize declared inputs by source URI (#37 — they live outside this work dir).\n'
         inputs.each { String stageName, Path source ->
+            // #55: if this input's stage name matches an attached ext.volumes mount,
+            // symlink the stage name → the mount and SKIP the copy — even though
+            // Nextflow reports the source as its own S3 stage copy of the DB.
+            // Pipelines like taxprofiler STAGE db_path (copy it into the S3 work
+            // area), so the source URI is never the mount; matching by basename is
+            // what lets a volume-backed reference DB stay zero-copy. The mount is
+            // bind-mounted into the container, so the symlink resolves inside it.
+            final String mountForStage = mountByBase[baseName(stageName)]
+            if (mountForStage) {
+                final destParent = stageName.contains('/') ? stageName.substring(0, stageName.lastIndexOf('/')) : ''
+                if (destParent) {
+                    sb << "mkdir -p \"\${LOCAL_DIR}/\"${shellQuote(destParent)}\n"
+                }
+                sb << "if [ -e ${shellQuote(mountForStage)} ]; then ln -sfn ${shellQuote(mountForStage)} \"\${LOCAL_DIR}/\"${shellQuote(stageName)}; else echo \"nf-spawn: ext.volumes mount ${mountForStage} not present for input ${stageName}\" >&2; exit 1; fi\n"
+                return
+            }
             final uri = normalizeS3Uri(source.toUri().toString())
             if (!uri.startsWith('s3://')) {
                 // A LOCAL absolute path (file:// or a bare path). The common case

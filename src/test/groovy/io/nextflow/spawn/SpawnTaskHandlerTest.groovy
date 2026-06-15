@@ -451,6 +451,54 @@ class SpawnTaskHandlerTest extends Specification {
         SpawnTaskHandler.volumeBindMounts(null) == ''
     }
 
+    def 'a path input whose stage name matches an ext.volumes mount is symlinked, NOT copied — even when Nextflow staged it to s3 (#55)'() {
+        given: 'taxprofiler stages db_path into the S3 work area, so the source is s3://… not the mount'
+        def inputs = ['metaphlan': s3Path('s3://bucket/work/classify/stage-abc/70/x/metaphlan/')] as Map<String, java.nio.file.Path>
+        def mounts = ['/opt/databases/metaphlan']
+
+        when:
+        def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'metaphlan', 'img:1', inputs, '', '', mounts)
+
+        then: 'the stage name is symlinked to the mount (zero-copy), guarded by existence'
+        script.contains('if [ -e \'/opt/databases/metaphlan\' ]; then ln -sfn \'/opt/databases/metaphlan\' "${LOCAL_DIR}/"\'metaphlan\';')
+
+        and: 'the huge DB is NOT aws-s3-cp\'d despite the s3:// source'
+        !script.contains("aws s3 cp 's3://bucket/work/classify/stage-abc")
+        !script.contains('metaphlan --region')
+    }
+
+    def 'a non-matching s3 input is still copied when ext.volumes is present (#55)'() {
+        given: 'reads are a normal staged input; only the DB matches a mount'
+        def inputs = [
+            'reads_1.fq.gz': s3Path('s3://data/sra/SRR_1.fq.gz'),
+            'metaphlan'    : s3Path('s3://bucket/work/stage/metaphlan/'),
+        ] as Map<String, java.nio.file.Path>
+        def mounts = ['/opt/databases/metaphlan']
+
+        when:
+        def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'run', 'img:1', inputs, '', '', mounts)
+
+        then: 'reads are copied as usual'
+        script.contains('''aws s3 cp 's3://data/sra/SRR_1.fq.gz' "${LOCAL_DIR}/"'reads_1.fq.gz''')
+
+        and: 'the DB is symlinked, not copied'
+        script.contains('ln -sfn \'/opt/databases/metaphlan\'')
+        !script.contains("aws s3 cp 's3://bucket/work/stage/metaphlan")
+    }
+
+    def 'volumeMountPaths extracts mount paths; baseName takes the last segment (#55)'() {
+        expect:
+        SpawnTaskHandler.volumeMountPaths([[snapshot: 'snap-a', mount: '/opt/databases/metaphlan'], [snapshot: 'snap-b', mount: '/data']]) ==
+            ['/opt/databases/metaphlan', '/data']
+        SpawnTaskHandler.volumeMountPaths(null) == []
+
+        and:
+        SpawnTaskHandler.baseName('/opt/databases/metaphlan') == 'metaphlan'
+        SpawnTaskHandler.baseName('/opt/databases/metaphlan/') == 'metaphlan'
+        SpawnTaskHandler.baseName('kraken2') == 'kraken2'
+        SpawnTaskHandler.baseName('') == ''
+    }
+
     def 'a malformed s3:/// source (empty authority) is repaired to s3:// (#41 bug 1)'() {
         given: 'the nf-amazon Path renders toUri() with an empty authority — bucket lands in the path'
         def inputs = ['reads.fq.gz': s3Path('s3:///my-bucket/work/fetch/SRR059375_1.fastq.gz')] as Map<String, java.nio.file.Path>
