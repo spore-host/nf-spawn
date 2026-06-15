@@ -85,6 +85,7 @@ workDir = 's3://my-bucket/nextflow-work'
 |--------|---------|-------------|
 | `ext.instanceType` | `t3.medium` | EC2 instance type for the task |
 | `ext.region` | `us-east-1` | AWS region |
+| `ext.az` | _(spawn picks)_ | Pin the task to an availability zone (`--az`). Set this to the AZ where a snapshot's [Fast Snapshot Restore](#delivering-reference-data) is enabled — FSR is per-AZ, so a volume restored in another AZ lazy-loads from S3 instead |
 | `ext.ttl` | `2h` | Max instance lifetime (safety backstop) |
 | `ext.spot` | `false` | Launch as a Spot instance |
 | `ext.ami` | _(auto)_ | Explicit AMI ID; omit to let spawn auto-detect a stock AMI |

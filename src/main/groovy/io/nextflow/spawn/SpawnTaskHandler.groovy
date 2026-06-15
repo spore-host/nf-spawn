@@ -45,6 +45,11 @@ class SpawnTaskHandler extends TaskHandler {
         boolean spot        = ext.spot ? true : false
         String ami          = (ext.ami ?: '') as String
         int volumeSize      = (ext.volumeSize ?: 0) as int
+        // Pin the task to a specific AZ (#62). Needed for Fast Snapshot Restore:
+        // FSR is per-AZ, so a volume created from an FSR-warmed snapshot is only
+        // fast-restored in the AZ where FSR is enabled — elsewhere it lazy-loads
+        // blocks from S3 (~6-8 MB/s). Empty → spawn picks placement as before.
+        String az           = (ext.az ?: '') as String
 
         // Attach pre-populated EBS data volumes from snapshots, mounted read-only
         // by default — so a large reference DB (e.g. Kraken2) lives in a
@@ -103,7 +108,7 @@ class SpawnTaskHandler extends TaskHandler {
         scriptFile.toFile().setExecutable(true)
 
         // Build the spawn launch command
-        List<String> cmd = buildLaunchCommand(instanceName, instanceType, region, ttl, spot, scriptFile.toString(), ami, volumeSize, attachVolumes)
+        List<String> cmd = buildLaunchCommand(instanceName, instanceType, region, ttl, spot, scriptFile.toString(), ami, volumeSize, attachVolumes, az)
 
         log.debug "spawn launch command: ${cmd.join(' ')}"
 
@@ -254,11 +259,15 @@ class SpawnTaskHandler extends TaskHandler {
     // --attach-volume (repeatable) attaches a pre-populated EBS volume from a
     // snapshot; each value is `snap-xxx:/mount[:ro|:rw]` (spawn#144). Used to
     // mount large reference data on a stock AMI (#45).
+    //
+    // --az is passed only when ext.az is set, pinning the instance to that
+    // availability zone (#62). Otherwise spawn chooses placement, preserving the
+    // prior default. This matters for Fast Snapshot Restore, which is per-AZ.
     @groovy.transform.PackageScope
     static List<String> buildLaunchCommand(String instanceName, String instanceType,
                                            String region, String ttl, boolean spot,
                                            String scriptPath, String ami, int volumeSize,
-                                           List<String> attachVolumes = []) {
+                                           List<String> attachVolumes = [], String az = '') {
         List<String> cmd = [
             'spawn', 'launch', instanceName,
             '--instance-type', instanceType,
@@ -278,6 +287,9 @@ class SpawnTaskHandler extends TaskHandler {
         }
         for (String v : (attachVolumes ?: [])) {
             cmd.addAll(['--attach-volume', v])
+        }
+        if (az) {
+            cmd.addAll(['--az', az])
         }
         if (spot) {
             cmd << '--spot'
