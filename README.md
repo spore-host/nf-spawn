@@ -112,10 +112,14 @@ the data:
 - **Direct reads** — a tool you invoke yourself with `--db /opt/databases/x`
   reads the mount directly.
 - **Staged `path` inputs** — the nf-core `db_path` pattern (e.g. taxprofiler's
-  `databases.csv`). nf-spawn **symlinks** the input's stage name in the work dir
-  to the mount path (the spawn equivalent of Nextflow's `stageInMode=symlink`),
-  and **bind-mounts** the volume into the task container, so a tool that does
-  `find -L <db>` resolves to the read-only volume — no copy.
+  `databases.csv`). When a declared input's **stage-name basename matches an
+  `ext.volumes` mount** (e.g. input `metaphlan` ↔ mount `/opt/databases/metaphlan`),
+  nf-spawn **symlinks** that stage name → the mount and **skips the copy**, then
+  **bind-mounts** the volume into the container — so a tool that does
+  `find -L <db>` resolves to the read-only volume, zero-copy. This holds even
+  though such pipelines *stage* `db_path` into the Nextflow work area (the match
+  is by stage name, not source URI; requires nf-spawn ≥ 0.6.0). **Name the mount
+  to match the input** — for taxprofiler, the `db_name` drives the stage name.
 
   > **The head node also needs the DB at that path.** nf-core pipelines validate
   > `db_path` exists on the head at init (before any task launches); satisfying it
