@@ -141,6 +141,21 @@ the data:
   > Either way the mount-point directory is created for you on spawn-launched
   > instances; you never pre-create it.
 
+  > **⚠️ Don't let `db_path` resolve to a *head-local* path foreign to the work
+  > dir.** If the head mounts the DB at `/opt/databases/x` **and** `db_path`
+  > points at that local path, Nextflow's FilePorter treats it as a foreign file
+  > and **bulk-copies the whole DB up to the (S3) work dir on the head, before any
+  > task launches** — a 16–34 GB upload that can stall and **deadlock** the run
+  > (the `db` channel sits `(queue) OPEN`, no tasks submit; nf-spawn#65). nf-spawn
+  > can't prevent this — it does no head work; the copy is Nextflow's own
+  > head-side staging. The mount on the head is only there to satisfy nf-core's
+  > **existence check** — `db_path` itself should resolve to something the work
+  > dir doesn't have to localize: a value that isn't a foreign local path (e.g.
+  > the work-dir filesystem or a pre-staged `s3://` URI, option 2), or wire the
+  > volume DB so it isn't routed through a head-localized `path` channel at all.
+  > The instance-side symlink (above) only engages *after* a task is scheduled, so
+  > it can't rescue a run that deadlocks during head-side staging.
+
 **2. An `s3://` `db_path` — download-per-task fallback.**
 If you can't mount on the head (or don't want to), point `db_path` at an `s3://`
 URI: nf-spawn's declared-input localization (#37) `aws s3 cp`s it onto each task,
