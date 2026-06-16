@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- `ext.volumes` reference-data guide now warns that `db_path` must not resolve to
+  a head-local path foreign to the work dir: Nextflow's FilePorter would bulk-copy
+  the whole DB to the (S3) work dir on the head before any task launches and can
+  deadlock the run (nf-spawn#65). nf-spawn does no head work, so this is resolved
+  in pipeline config, not the plugin.
+
 ## [0.7.0] - 2026-06-15
 
 ### Added
