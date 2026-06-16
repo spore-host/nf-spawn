@@ -57,6 +57,18 @@ class SpawnTaskHandler extends TaskHandler {
         // custom AMI (#45 → spawn#144). Each becomes a `spawn launch --attach-volume`.
         List<String> attachVolumes = parseVolumeSpecs(ext.volumes)
 
+        // Mount a SHARED reference filesystem — FSx for Lustre or EFS — into the
+        // task (#67). For a stable reference DB read by a WIDE fan-out (e.g.
+        // taxprofiler's Kraken2/MetaPhlAn DBs over 30-100 samples), a shared FS is
+        // the right primitive: one copy, N concurrent read-only mounts, no
+        // per-volume Fast-Snapshot-Restore credit cliff that the ext.volumes path
+        // hits at scale. Pre-create the FS once (`spawn fsx create` / out of band)
+        // and reference it by id here; each task mounts the SAME filesystem. Empty
+        // → no shared FS (today's behavior). Each becomes `spawn launch
+        // --fsx-id`/`--efs-id`.
+        Map fsx = parseSharedFs(ext.fsx, '/fsx')
+        Map efs = parseSharedFs(ext.efs, '/efs')
+
         log.info "Submitting task '${task.name}' to spawn instance '${instanceName}' (${instanceType} in ${region})"
 
         // task.workDir is the directory Nextflow reads back after the task to
@@ -89,6 +101,15 @@ class SpawnTaskHandler extends TaskHandler {
         if (volumeMounts) {
             runOptions = (runOptions ? runOptions + ' ' : '') + volumeMounts
         }
+        // Same for the shared FSx/EFS mount (#67): the FS is mounted on the host
+        // by spawn, but the task runs in Docker and would otherwise not see it.
+        // Bind it through read-only at the same path so a `path`-input DB
+        // symlinked to the mount resolves to the real bytes inside the container —
+        // exactly as ext.volumes does.
+        String sharedFsMounts = sharedFsBindMounts([fsx, efs])
+        if (sharedFsMounts) {
+            runOptions = (runOptions ? runOptions + ' ' : '') + sharedFsMounts
+        }
 
         // Resolve the per-task setup/bootstrap that runs BEFORE the task, so a
         // STOCK AL2023 AMI works without baking Docker/tools into a custom AMI
@@ -96,11 +117,14 @@ class SpawnTaskHandler extends TaskHandler {
         // (dnf install) and an arbitrary `ext.setup` command.
         String setup = buildSetupScript(ext, container)
 
-        // The ext.volumes mount paths — a declared `path` input whose stage name
-        // matches a mount basename is symlinked to the mount instead of copied,
-        // so a pipeline that STAGES its db_path (e.g. taxprofiler copies it into
-        // the S3 work area) still reads the DB zero-copy off the volume (#55).
-        List<String> mountPaths = volumeMountPaths(ext.volumes)
+        // The mount paths a declared `path` input can be symlinked to instead of
+        // copied (the #55 zero-copy short-circuit): both the ext.volumes mounts AND
+        // the shared FSx/EFS mount (#67). Without feeding the shared-FS mount in
+        // here, tasks would mount the FS but a staged db_path (e.g. taxprofiler
+        // copies it into the S3 work area) would still localize from S3 instead of
+        // using the mount. A stage-name basename matching a dir under any of these
+        // mounts resolves zero-copy.
+        List<String> mountPaths = volumeMountPaths(ext.volumes) + sharedFsMountPaths([fsx, efs])
 
         // Write the staging script to a temp file shipped as instance user-data.
         Path scriptFile = Files.createTempFile("nf-spawn-${instanceName}-", ".sh")
@@ -108,7 +132,7 @@ class SpawnTaskHandler extends TaskHandler {
         scriptFile.toFile().setExecutable(true)
 
         // Build the spawn launch command
-        List<String> cmd = buildLaunchCommand(instanceName, instanceType, region, ttl, spot, scriptFile.toString(), ami, volumeSize, attachVolumes, az)
+        List<String> cmd = buildLaunchCommand(instanceName, instanceType, region, ttl, spot, scriptFile.toString(), ami, volumeSize, attachVolumes, az, fsx, efs)
 
         log.debug "spawn launch command: ${cmd.join(' ')}"
 
@@ -263,11 +287,19 @@ class SpawnTaskHandler extends TaskHandler {
     // --az is passed only when ext.az is set, pinning the instance to that
     // availability zone (#62). Otherwise spawn chooses placement, preserving the
     // prior default. This matters for Fast Snapshot Restore, which is per-AZ.
+    //
+    // --fsx-id / --efs-id (+ their --*-mount-point) are passed only when ext.fsx /
+    // ext.efs are set (#67), mounting a SHARED reference filesystem the user
+    // pre-created. Empty maps → neither flag, preserving the prior default. Only
+    // the existing-filesystem (id) form is supported here: nf-spawn launches one
+    // instance per task, so --fsx-create would create one filesystem PER task — a
+    // fan-out footgun — whereas a single pre-built FS is mounted by every task.
     @groovy.transform.PackageScope
     static List<String> buildLaunchCommand(String instanceName, String instanceType,
                                            String region, String ttl, boolean spot,
                                            String scriptPath, String ami, int volumeSize,
-                                           List<String> attachVolumes = [], String az = '') {
+                                           List<String> attachVolumes = [], String az = '',
+                                           Map fsx = [:], Map efs = [:]) {
         List<String> cmd = [
             'spawn', 'launch', instanceName,
             '--instance-type', instanceType,
@@ -291,10 +323,109 @@ class SpawnTaskHandler extends TaskHandler {
         if (az) {
             cmd.addAll(['--az', az])
         }
+        if (fsx?.id) {
+            cmd.addAll(['--fsx-id', fsx.id as String])
+            if (fsx.mount) {
+                cmd.addAll(['--fsx-mount-point', fsx.mount as String])
+            }
+        }
+        if (efs?.id) {
+            cmd.addAll(['--efs-id', efs.id as String])
+            if (efs.mount) {
+                cmd.addAll(['--efs-mount-point', efs.mount as String])
+            }
+        }
         if (spot) {
             cmd << '--spot'
         }
         return cmd
+    }
+
+    // parseSharedFs normalizes the `ext.fsx` / `ext.efs` directive into a map with
+    // `id`, `mount`, and `paths` keys (#67). It accepts:
+    //   - a bare filesystem id string:  ext.fsx = 'fs-0abc'         → mount defaults
+    //   - a map: [ id: 'fs-0abc', mount: '/fsx', paths: ['kraken2'] ]
+    // `mount` defaults to defaultMount (/fsx or /efs). `paths` is an optional list
+    // of subdirectory names under the mount that a declared `path` input may be
+    // symlinked to (the #55 zero-copy short-circuit) — e.g. paths:['kraken2'] makes
+    // a `kraken2` stage-name input resolve to <mount>/kraken2. Empty/null → [:] (no
+    // shared FS). Only the existing-filesystem (id) form is supported; a `create`
+    // key is rejected with a pointer to the follow-up, since per-task creation
+    // would multiply filesystems across a fan-out.
+    @groovy.transform.PackageScope
+    static Map parseSharedFs(Object spec, String defaultMount) {
+        if (!spec) return [:]
+        if (spec instanceof CharSequence) {
+            String id = spec.toString().trim()
+            return id ? [id: id, mount: defaultMount, paths: []] : [:]
+        }
+        if (!(spec instanceof Map)) {
+            throw new AbortOperationException("ext.fsx/ext.efs must be a filesystem-id string or a map with 'id', got: ${spec.getClass().name}")
+        }
+        Map m = spec as Map
+        if (m.create) {
+            throw new AbortOperationException(
+                "ext.fsx create form is not supported: nf-spawn launches one instance per task, " +
+                "so --fsx-create would create one filesystem per task across a fan-out. Pre-create a " +
+                "shared filesystem (spawn fsx create) and reference it by id: ext.fsx = 'fs-xxx'. " +
+                "(per-run ephemeral shared FS is tracked as a follow-up.)")
+        }
+        String id = (m.id ?: m.fsxId ?: m.efsId ?: '') as String
+        if (!id) {
+            throw new AbortOperationException("ext.fsx/ext.efs map needs an 'id' (fs-xxx): ${m}")
+        }
+        String mount = (m.mount ?: m.mountPoint ?: defaultMount) as String
+        List<String> paths = []
+        Object p = m.paths ?: m.path
+        if (p instanceof List) {
+            paths = (p as List).collect { (it as String).trim() }.findAll { it }
+        } else if (p instanceof CharSequence) {
+            String s = p.toString().trim()
+            if (s) paths = [s]
+        }
+        return [id: id, mount: mount, paths: paths]
+    }
+
+    // sharedFsBindMounts turns parsed ext.fsx/ext.efs maps into `docker run -v`
+    // read-only bind-mount flags so the host-mounted shared filesystem is visible
+    // INSIDE the task container at the same path (#67) — mirroring volumeBindMounts
+    // for ext.volumes. Reference data is read-only by nature here, so the mount is
+    // always :ro. Returns '' when no shared FS is set.
+    @groovy.transform.PackageScope
+    static String sharedFsBindMounts(List<Map> fsList) {
+        List<String> flags = []
+        for (Map fs : (fsList ?: [])) {
+            if (!fs?.id || !fs?.mount) continue
+            String mount = fs.mount as String
+            flags << "-v ${shellQuote(mount + ':' + mount + ':ro')}".toString()
+        }
+        return flags.join(' ')
+    }
+
+    // sharedFsMountPaths returns the symlink-eligible paths for the #55 zero-copy
+    // short-circuit from parsed ext.fsx/ext.efs maps (#67). A shared FS mounts at a
+    // single root (e.g. /fsx) but typically holds several DBs at /fsx/<name>, so a
+    // bare /fsx basename ('fsx') rarely matches a stage name. We therefore expose
+    // <mount>/<name> for each declared `paths` entry (so a 'kraken2' input resolves
+    // to /fsx/kraken2), and fall back to the bare mount when none are declared (so
+    // a DB mounted AT the root, or a single-DB FS, still matches).
+    @groovy.transform.PackageScope
+    static List<String> sharedFsMountPaths(List<Map> fsList) {
+        List<String> out = []
+        for (Map fs : (fsList ?: [])) {
+            if (!fs?.id || !fs?.mount) continue
+            String mount = (fs.mount as String).replaceAll('/+$', '')
+            List paths = (fs.paths ?: []) as List
+            if (paths) {
+                for (Object name : paths) {
+                    String n = (name as String).trim()
+                    if (n) out << "${mount}/${n}".toString()
+                }
+            } else {
+                out << mount
+            }
+        }
+        return out
     }
 
     // parseVolumeSpecs turns the `ext.volumes` directive into `spawn launch

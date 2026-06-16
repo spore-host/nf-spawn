@@ -91,6 +91,8 @@ workDir = 's3://my-bucket/nextflow-work'
 | `ext.ami` | _(auto)_ | Explicit AMI ID; omit to let spawn auto-detect a stock AMI |
 | `ext.volumeSize` | _(AMI min)_ | Extra root EBS size in GiB beyond the AMI minimum |
 | `ext.volumes` | _(none)_ | List of `[snapshot:, mount:, readOnly:]` maps — attach EBS data volumes from snapshots (read-only by default), bind-mounted into the task container. Works for both direct reads and staged `path` inputs (symlinked, zero-copy) — see [Delivering reference data](#delivering-reference-data). Requires spawn ≥ 0.46.0 |
+| `ext.fsx` | _(none)_ | Mount a **shared FSx for Lustre** filesystem by id (`--fsx-id`). `'fs-0abc'` (mount defaults `/fsx`) or `[ id:, mount:, paths: ]`. For one reference DB read by a **wide fan-out** — all tasks mount the same FS (no FSR credit cliff). Declared `paths` (e.g. `['kraken2']` → `/fsx/kraken2`) symlink zero-copy like `ext.volumes`. Pre-create the FS (`spawn fsx create`); the create-per-task form is not supported. Requires spawn ≥ 0.46.0 |
+| `ext.efs` | _(none)_ | Mount a **shared EFS** filesystem by id (`--efs-id`), same shape as `ext.fsx` (mount defaults `/efs`). For shared reference data where EFS's elasticity fits better than Lustre |
 | `ext.ensureDocker` | `true` | Auto-install + start Docker on the task instance when a `container` is set (idempotent), so a stock AMI works. Set `false` if your AMI already has Docker |
 | `ext.packages` | _(none)_ | Host packages to `dnf install` before the task — a list (`['pigz','ethtool']`) or a space/comma string. For tools the task calls on the instance |
 | `ext.setup` | _(none)_ | Arbitrary shell command run on the instance before the task (after Docker/packages) |
@@ -101,9 +103,11 @@ workDir = 's3://my-bucket/nextflow-work'
 
 ### Delivering reference data
 
-Large reference data (a Kraken2/MetaPhlAn DB, BLAST index) reaches a task two
-ways. Prefer **`ext.volumes`** — it's read straight off an attached read-only
-snapshot with **zero copy and zero per-task download**.
+Large reference data (a Kraken2/MetaPhlAn DB, BLAST index) reaches a task three
+ways. Pick by fan-out width: **`ext.volumes`** (an attached read-only snapshot,
+zero-copy) is simplest at small scale; a shared **`ext.fsx` / `ext.efs`**
+filesystem is the answer for wide fan-out where FSR credits run out; an `s3://`
+`db_path` is the per-task-download fallback.
 
 **1. `ext.volumes` — a read-only snapshot, mounted (recommended).**
 The DB lives on an EBS snapshot (`spawn snapshot create`), attached read-only at
@@ -156,12 +160,40 @@ the data:
   > The instance-side symlink (above) only engages *after* a task is scheduled, so
   > it can't rescue a run that deadlocks during head-side staging.
 
-**2. An `s3://` `db_path` — download-per-task fallback.**
+**2. A shared `ext.fsx` / `ext.efs` filesystem — one copy, many readers (best for wide fan-out).**
+`ext.volumes` (option 1) is the cheapest path at *small* fan-out, but it relies on
+**Fast Snapshot Restore** to be fast on cold tasks — and FSR has a per-snapshot
+credit bucket (~10 concurrently-warmed volumes). A 30–100-sample run creating ~50
+volumes from one DB snapshot at once **drains the credits instantly**, and the
+overflow volumes lazy-load from S3 at ~6–8 MB/s (classification crawls). For that
+*one stable reference, many concurrent readers* shape, mount a **shared
+filesystem** instead:
+
+- Pre-create an FSx for Lustre FS once, S3-backed (lazy-import) so it holds the DB
+  with no separate upload: `spawn fsx create …` (or out of band). FSx returns an
+  `fs-xxx` id.
+- `ext.fsx = 'fs-xxx'` — every task mounts the **same** filesystem read-only at
+  `/fsx` (no per-volume credit limit, no copy). Use the map form to place DBs and
+  declare which resolve zero-copy: `ext.fsx = [ id: 'fs-xxx', mount: '/fsx', paths: ['kraken2','metaphlan'] ]`.
+- A declared `path` input whose stage name matches a `paths` entry (e.g. input
+  `kraken2` ↔ `/fsx/kraken2`) is **symlinked, not copied** — the same #55
+  zero-copy short-circuit `ext.volumes` gets, so a pipeline that *stages*
+  `db_path` still reads it off the mount. The head-node existence-check and
+  foreign-`db_path` caveats above apply identically.
+- `ext.efs` is the same by id (`fs-xxx`, mount `/efs`) when EFS's elasticity suits
+  better than Lustre's throughput.
+
+Only the existing-filesystem (**id**) form is supported. nf-spawn launches one
+instance per task, so a `--fsx-create` per task would create one filesystem *per
+task* across the fan-out — exactly the multiplication a shared FS is meant to
+avoid. Create it once, reference it by id.
+
+**3. An `s3://` `db_path` — download-per-task fallback.**
 If you can't mount on the head (or don't want to), point `db_path` at an `s3://`
 URI: nf-spawn's declared-input localization (#37) `aws s3 cp`s it onto each task,
 and an `s3://` URI also skips nf-core's head-side existence check. The trade-off
 is that **every task downloads the full DB (16–34 GB)** — wasteful for anything
-beyond small fan-out. Prefer option 1.
+beyond small fan-out. Prefer option 1 (small fan-out) or option 2 (wide fan-out).
 
 ## Example pipeline
 
