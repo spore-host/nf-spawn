@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `ext.fsx` / `ext.efs` directives: mount a **shared reference filesystem** (FSx
+  for Lustre or EFS) into a task, forwarded to `spawn launch --fsx-id` /
+  `--efs-id` (+ `--fsx-mount-point` / `--efs-mount-point`) (#67). This is the
+  right primitive for *one stable reference DB read by a wide fan-out* (e.g.
+  nf-core/taxprofiler's Kraken2/MetaPhlAn DBs over 30–100 samples): one copy, N
+  concurrent read-only mounts, **no per-volume Fast-Snapshot-Restore credit
+  cliff** that `ext.volumes` hits at scale. Minimal form `ext.fsx = 'fs-0abc'`
+  (mount defaults to `/fsx`); map form `[ id:, mount:, paths: ]`. The mount is
+  bind-mounted read-only into the task container, and a declared `path` input
+  whose stage name matches a declared `paths` entry (e.g. `paths: ['kraken2']` →
+  `/fsx/kraken2`) is symlinked zero-copy — the same #55 short-circuit
+  `ext.volumes` gets, so a pipeline that *stages* its `db_path` still reads it off
+  the mount. Only the existing-filesystem (**id**) form is supported: nf-spawn
+  launches one instance per task, so a per-task `--fsx-create` would create one
+  filesystem per task — pre-create a shared FS once (`spawn fsx create`) and
+  reference it by id. Requires spawn ≥ 0.46.0 (FSx/EFS mount-by-id).
+
 ### Documentation
 - `ext.volumes` reference-data guide now warns that `db_path` must not resolve to
   a head-local path foreign to the work dir: Nextflow's FilePorter would bulk-copy

@@ -100,6 +100,124 @@ class SpawnTaskHandlerTest extends Specification {
         !withoutAz.contains('--az')
     }
 
+    def 'forwards ext.fsx by id as --fsx-id (+ mount point) only when set (#67)'() {
+        when:
+        def withFsx = SpawnTaskHandler.buildLaunchCommand(
+            'n', 'r7g.2xlarge', 'us-east-1', '2h', false, '/s.sh', '', 0, [], '',
+            [id: 'fs-0abc', mount: '/fsx', paths: []])
+        def withoutFsx = SpawnTaskHandler.buildLaunchCommand(
+            'n', 't3.medium', 'us-east-1', '2h', false, '/s.sh', '', 0)
+
+        then: 'the filesystem id and mount point are forwarded'
+        withFsx.contains('--fsx-id')
+        withFsx[withFsx.indexOf('--fsx-id') + 1] == 'fs-0abc'
+        withFsx.contains('--fsx-mount-point')
+        withFsx[withFsx.indexOf('--fsx-mount-point') + 1] == '/fsx'
+
+        and: 'no --fsx-id when unset, so spawn launch is unchanged (back-compat default)'
+        !withoutFsx.contains('--fsx-id')
+        !withoutFsx.contains('--fsx-mount-point')
+    }
+
+    def 'forwards ext.efs by id as --efs-id (+ mount point) only when set (#67)'() {
+        when:
+        def withEfs = SpawnTaskHandler.buildLaunchCommand(
+            'n', 't3.medium', 'us-east-1', '2h', false, '/s.sh', '', 0, [], '',
+            [:], [id: 'fs-0def', mount: '/efs', paths: []])
+
+        then:
+        withEfs.contains('--efs-id')
+        withEfs[withEfs.indexOf('--efs-id') + 1] == 'fs-0def'
+        withEfs.contains('--efs-mount-point')
+        withEfs[withEfs.indexOf('--efs-mount-point') + 1] == '/efs'
+
+        and: 'fsx and efs do not interfere — neither leaks when only the other is set'
+        !withEfs.contains('--fsx-id')
+    }
+
+    def 'parseSharedFs accepts a bare id string and a map, defaulting the mount (#67)'() {
+        expect: 'a bare filesystem-id string → id + default mount'
+        SpawnTaskHandler.parseSharedFs('fs-0abc', '/fsx') == [id: 'fs-0abc', mount: '/fsx', paths: []]
+
+        and: 'a map can override the mount and declare symlink paths'
+        SpawnTaskHandler.parseSharedFs([id: 'fs-0abc', mount: '/data', paths: ['kraken2', 'metaphlan']], '/fsx') ==
+            [id: 'fs-0abc', mount: '/data', paths: ['kraken2', 'metaphlan']]
+
+        and: 'a single string path is normalized to a one-element list'
+        SpawnTaskHandler.parseSharedFs([id: 'fs-0abc', path: 'kraken2'], '/fsx') ==
+            [id: 'fs-0abc', mount: '/fsx', paths: ['kraken2']]
+
+        and: 'efsId / fsxId key aliases for id are accepted'
+        SpawnTaskHandler.parseSharedFs([efsId: 'fs-0def'], '/efs') == [id: 'fs-0def', mount: '/efs', paths: []]
+
+        and: 'null / empty → no shared FS'
+        SpawnTaskHandler.parseSharedFs(null, '/fsx') == [:]
+        SpawnTaskHandler.parseSharedFs('', '/fsx') == [:]
+    }
+
+    def 'parseSharedFs rejects the create form with a pointer to pre-creating by id (#67)'() {
+        when:
+        SpawnTaskHandler.parseSharedFs([create: true, lifecycle: 'ephemeral', s3Bucket: 'b'], '/fsx')
+
+        then: 'per-task create across a fan-out is a footgun — rejected'
+        def e = thrown(nextflow.exception.AbortOperationException)
+        e.message.contains('create form is not supported')
+    }
+
+    def 'parseSharedFs requires an id in the map form (#67)'() {
+        when:
+        SpawnTaskHandler.parseSharedFs([mount: '/fsx'], '/fsx')
+
+        then:
+        thrown(nextflow.exception.AbortOperationException)
+    }
+
+    def 'sharedFsBindMounts bind-mounts the shared FS read-only into the container (#67)'() {
+        expect:
+        SpawnTaskHandler.sharedFsBindMounts([[id: 'fs-0abc', mount: '/fsx', paths: []]]) ==
+            "-v '/fsx:/fsx:ro'"
+
+        and: 'fsx and efs together'
+        SpawnTaskHandler.sharedFsBindMounts([
+            [id: 'fs-0abc', mount: '/fsx', paths: []],
+            [id: 'fs-0def', mount: '/efs', paths: []],
+        ]) == "-v '/fsx:/fsx:ro' -v '/efs:/efs:ro'"
+
+        and: 'empty maps contribute nothing'
+        SpawnTaskHandler.sharedFsBindMounts([[:], [:]]) == ''
+    }
+
+    def 'sharedFsMountPaths exposes <mount>/<name> per declared path, or the bare mount (#67)'() {
+        expect: 'declared paths become <mount>/<name> so a stage-name input symlinks zero-copy'
+        SpawnTaskHandler.sharedFsMountPaths([[id: 'fs-0abc', mount: '/fsx', paths: ['kraken2', 'metaphlan']]]) ==
+            ['/fsx/kraken2', '/fsx/metaphlan']
+
+        and: 'no declared paths → the bare mount (a DB mounted at the root, or single-DB FS)'
+        SpawnTaskHandler.sharedFsMountPaths([[id: 'fs-0abc', mount: '/fsx', paths: []]]) == ['/fsx']
+
+        and: 'a trailing slash on the mount is normalized'
+        SpawnTaskHandler.sharedFsMountPaths([[id: 'fs-0abc', mount: '/fsx/', paths: ['kraken2']]]) == ['/fsx/kraken2']
+
+        and: 'empty maps contribute nothing'
+        SpawnTaskHandler.sharedFsMountPaths([[:]]) == []
+    }
+
+    def 'a path input matching a shared-FS db dir is symlinked, not copied — even when Nextflow staged it to s3 (#67/#55)'() {
+        given: 'taxprofiler stages the Kraken2 db_path into the S3 work area; the FS holds it at /fsx/kraken2'
+        def inputs = ['kraken2': s3Path('s3://bucket/work/classify/stage-abc/70/x/kraken2/')] as Map<String, java.nio.file.Path>
+        def mounts = SpawnTaskHandler.sharedFsMountPaths([[id: 'fs-0abc', mount: '/fsx', paths: ['kraken2']]])
+
+        when:
+        def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'kraken2', 'img:1', inputs, '', '', mounts)
+
+        then: 'the stage name symlinks to the shared-FS db dir (zero-copy), guarded by existence'
+        script.contains('if [ -e \'/fsx/kraken2\' ]; then ln -sfn \'/fsx/kraken2\' "${LOCAL_DIR}/"\'kraken2\';')
+
+        and: 'the huge DB is NOT aws-s3-cp\'d despite the s3:// source'
+        !script.contains("aws s3 cp 's3://bucket/work/classify/stage-abc")
+        !script.contains('kraken2 --region')
+    }
+
     def 'parseVolumeSpecs maps ext.volumes maps to snap:mount:mode, read-only by default (#45)'() {
         expect:
         SpawnTaskHandler.parseVolumeSpecs([[snapshot: 'snap-aaa', mount: '/ref']]) == ['snap-aaa:/ref:ro']
