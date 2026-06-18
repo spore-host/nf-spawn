@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- README install/config snippets now reference `nf-spawn@0.8.0` (the current
+  release) instead of the stale `@0.2.0`.
+
 ## [0.8.0] - 2026-06-16
 
 ### Added
