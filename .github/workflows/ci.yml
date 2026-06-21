@@ -37,3 +37,9 @@ jobs:
 
       - name: Build
         run: ./gradlew assemble --no-daemon
+
+      # Run the Spock suite so CI actually gates on the unit tests (#59) — the
+      # generated-shell-correctness and command-builder tests are the project's
+      # main safety net and were previously never executed in CI.
+      - name: Test
+        run: ./gradlew test --no-daemon

@@ -79,6 +79,17 @@ class SpawnTaskHandler extends TaskHandler {
         this.workDirUri = task.workDirStr
         String workDirUri = this.workDirUri
 
+        // The spawn executor runs each task on a separate instance, so the work
+        // dir MUST be a shared S3 location both sides can reach. A missing or
+        // non-S3 workDir (e.g. the default local ./work) can't be synced — fail
+        // fast with a clear message instead of launching an instance that hangs
+        // the task in RUNNING while the .exitcode probe never resolves (#59).
+        if (!workDirUri || !workDirUri.startsWith('s3://')) {
+            throw new AbortOperationException(
+                "nf-spawn requires an S3 work directory (set `workDir = 's3://<bucket>/<prefix>'` " +
+                "in nextflow.config); got ${workDirUri ?: '(unset)'}")
+        }
+
         // The container directive (if any): run the task inside it via Docker so
         // tools that live only in the image (the norm for nf-core modules) are
         // found, instead of on the bare OS (#30). Empty/null → run on the OS.
@@ -127,22 +138,32 @@ class SpawnTaskHandler extends TaskHandler {
         List<String> mountPaths = volumeMountPaths(ext.volumes) + sharedFsMountPaths([fsx, efs])
 
         // Write the staging script to a temp file shipped as instance user-data.
+        // It contains the full task script, so delete it once spawn has read it
+        // into the launch (in a finally) rather than leaving it in /tmp (#59).
         Path scriptFile = Files.createTempFile("nf-spawn-${instanceName}-", ".sh")
-        scriptFile.toFile().text = buildStagingScript(workDirUri, region, task.script, container, task.getInputFilesMap(), runOptions, setup, mountPaths)
-        scriptFile.toFile().setExecutable(true)
+        scriptFile.toFile().deleteOnExit() // backstop if the finally is bypassed
+        String output
+        int exitCode
+        try {
+            scriptFile.toFile().text = buildStagingScript(workDirUri, region, task.script, container, task.getInputFilesMap(), runOptions, setup, mountPaths)
+            scriptFile.toFile().setExecutable(true)
 
-        // Build the spawn launch command
-        List<String> cmd = buildLaunchCommand(instanceName, instanceType, region, ttl, spot, scriptFile.toString(), ami, volumeSize, attachVolumes, az, fsx, efs)
+            // Build the spawn launch command
+            List<String> cmd = buildLaunchCommand(instanceName, instanceType, region, ttl, spot, scriptFile.toString(), ami, volumeSize, attachVolumes, az, fsx, efs)
 
-        log.debug "spawn launch command: ${cmd.join(' ')}"
+            log.debug "spawn launch command: ${cmd.join(' ')}"
 
-        ProcessBuilder pb = new ProcessBuilder(cmd)
-        pb.redirectErrorStream(true)
-        pb.environment().putAll(System.getenv())
+            // ProcessBuilder already inherits the parent process environment, so
+            // there's no need to copy System.getenv() in explicitly.
+            ProcessBuilder pb = new ProcessBuilder(cmd)
+            pb.redirectErrorStream(true)
 
-        launchProcess = pb.start()
-        String output = launchProcess.inputStream.text
-        int exitCode  = launchProcess.waitFor()
+            launchProcess = pb.start()
+            output = launchProcess.inputStream.text
+            exitCode = launchProcess.waitFor()
+        } finally {
+            Files.deleteIfExists(scriptFile)
+        }
 
         if (exitCode != 0) {
             throw new AbortOperationException("spawn launch failed (exit $exitCode) for task '${task.name}':\n${output}")
@@ -681,12 +702,20 @@ class SpawnTaskHandler extends TaskHandler {
         sb << '\nNF_SPAWN_TASK_EOF\n'
         sb << 'chmod +x .command.sh\n'
         sb << buildRunLine(container, runOptions)
-        sb << 'TASK_RC=$?\n'
-        sb << 'echo "${TASK_RC}" > .exitcode\n\n'
+        sb << 'TASK_RC=$?\n\n'
 
         // 3. Sync outputs back FIRST (exclude .exitcode), then upload .exitcode
-        //    alone so its appearance always trails the outputs.
-        sb << 'aws s3 sync "${LOCAL_DIR}/" "${WORKDIR_S3}" --region "${AWS_REGION}" --exclude ".exitcode" --quiet\n'
+        //    alone so its appearance always trails the outputs. If the output
+        //    up-sync fails, Nextflow would otherwise still see the task's own
+        //    exit code (often 0) once .exitcode lands and finalize the task as
+        //    successful with MISSING outputs — a silent partial success (#59).
+        //    So if the sync fails and the task itself succeeded, record a
+        //    non-zero exit code instead, surfacing it as a task failure.
+        sb << 'if ! aws s3 sync "${LOCAL_DIR}/" "${WORKDIR_S3}" --region "${AWS_REGION}" --exclude ".exitcode" --quiet; then\n'
+        sb << '  echo "nf-spawn: output sync to ${WORKDIR_S3} failed" >&2\n'
+        sb << '  if [ "${TASK_RC}" -eq 0 ]; then TASK_RC=75; fi\n'
+        sb << 'fi\n'
+        sb << 'echo "${TASK_RC}" > .exitcode\n'
         sb << 'aws s3 cp .exitcode "${WORKDIR_S3%/}/.exitcode" --region "${AWS_REGION}" --quiet\n\n'
 
         // Completion signal for `spawn status --check-complete`, as the genuine

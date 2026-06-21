@@ -8,7 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- The staging temp file (which contains the full task script) is now deleted
+  after `spawn launch` reads it, instead of accumulating in the system temp dir
+  (#59).
+
+### Changed
+- CI now runs the Spock test suite (`./gradlew test`), which was previously never
+  executed — the build only ran `assemble` (#59).
+- Dropped a redundant `ProcessBuilder.environment().putAll(System.getenv())` in
+  task submission; ProcessBuilder already inherits the parent environment (#59).
+
 ### Fixed
+- A failed output up-sync no longer reports as a successful task (#59). The
+  staging script wrote `.exitcode` before syncing outputs to S3, so a sync
+  failure still left the task's own (often 0) exit code — Nextflow then
+  finalized the task as successful with missing outputs. The `.exitcode` is now
+  written after the sync, and a sync failure flips a success code to non-zero.
+- nf-spawn now fails fast with a clear message when the work directory is unset
+  or not an `s3://` URI, instead of launching an instance whose task hangs in
+  RUNNING because the work dir can't be synced (#59).
 - Task cancellation now actually terminates the instance (#58). `killTask` ran
   `spawn cancel <name>`, but `cancel` operates on parameter sweeps — it never
   destroyed the per-task instance, which then billed until its TTL (default 2h).

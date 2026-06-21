@@ -269,9 +269,13 @@ class SpawnTaskHandlerTest extends Specification {
         upOutputsIdx >= 0
         upExitIdx > upOutputsIdx
 
-        and: 'ordering: stage-down precedes run precedes stage-up'
+        and: 'a failed output sync flips a success exit code so it is not a silent partial success (#59)'
+        script.contains('if [ "${TASK_RC}" -eq 0 ]; then TASK_RC=75; fi')
+
+        and: 'ordering: stage-down precedes run; .exitcode is written AFTER the output sync (so a sync failure can flip it) and uploaded last'
         downIdx < script.indexOf('bash .command.sh')
-        script.indexOf('echo "${TASK_RC}" > .exitcode') < upOutputsIdx
+        script.indexOf('echo "${TASK_RC}" > .exitcode') > upOutputsIdx
+        script.indexOf('echo "${TASK_RC}" > .exitcode') < upExitIdx
 
         and: 'the work dir URI and region are injected, single-quoted'
         script.contains("WORKDIR_S3='s3://my-bucket/work/ab/cdef0123456789'")
