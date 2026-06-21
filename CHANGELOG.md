@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Task cancellation now actually terminates the instance (#58). `killTask` ran
+  `spawn cancel <name>`, but `cancel` operates on parameter sweeps — it never
+  destroyed the per-task instance, which then billed until its TTL (default 2h).
+  It now runs `spawn terminate <name> -y`, scopes the subprocess to the task's
+  region via `AWS_REGION` (so it can't target the wrong region and miss the
+  non-globally-unique `nf-<hash>` instance), and logs a non-zero exit at error
+  level as a cost incident instead of discarding it.
+
 ### Documentation
 - README install/config snippets now reference `nf-spawn@0.8.0` (the current
   release) instead of the stale `@0.2.0`.

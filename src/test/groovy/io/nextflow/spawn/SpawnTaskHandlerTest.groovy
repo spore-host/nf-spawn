@@ -702,4 +702,18 @@ class SpawnTaskHandlerTest extends Specification {
         null        | null
         'notanint'  | null
     }
+
+    def 'killTask uses spawn terminate (not cancel) with -y (#58)'() {
+        when:
+        def cmd = SpawnTaskHandler.buildTerminateCommand('nf-abc123')
+
+        then: 'terminate destroys the instance; cancel only cancels a sweep'
+        cmd == ['spawn', 'terminate', 'nf-abc123', '-y']
+        cmd[1] == 'terminate'
+        cmd.contains('-y')
+        !cmd.contains('cancel')
+        // region is intentionally NOT a flag — terminate reads AWS_REGION, which
+        // killTask sets on the subprocess environment.
+        !cmd.contains('--region')
+    }
 }

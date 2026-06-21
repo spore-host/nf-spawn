@@ -245,14 +245,37 @@ class SpawnTaskHandler extends TaskHandler {
     // kill() on the base now delegates to it (#9).
     @Override
     protected void killTask() {
-        log.info "Terminating spawn instance '${instanceName}' for task '${task.name}'"
+        log.info "Terminating spawn instance '${instanceName}' (${region}) for task '${task.name}'"
+
+        // Use `spawn terminate`, not `spawn cancel`: cancel operates on parameter
+        // sweeps, so it never destroyed the per-task instance — the box billed
+        // until its TTL. terminate takes the region from AWS_REGION (it has no
+        // --region flag), so we scope the subprocess env to this.region; without
+        // it terminate can target the wrong region and not find the instance
+        // (the `nf-<hash>` name is not globally unique). -y skips the
+        // irreversible-termination confirmation we can't answer over a pipe.
+        // A failed terminate leaks a billable instance, so treat a non-zero exit
+        // as an error, not a warning (#58).
+        List<String> cmd = buildTerminateCommand(instanceName)
         try {
-            new ProcessBuilder(['spawn', 'cancel', instanceName])
-                .redirectErrorStream(true)
-                .start()
-                .waitFor()
+            ProcessBuilder pb = new ProcessBuilder(cmd)
+            pb.redirectErrorStream(true)
+            pb.environment().putAll(System.getenv())
+            pb.environment().put('AWS_REGION', region)
+            pb.environment().put('AWS_DEFAULT_REGION', region)
+
+            Process p = pb.start()
+            String out = p.inputStream.text
+            int rc = p.waitFor()
+            if (rc != 0) {
+                log.error "spawn terminate failed (exit ${rc}) for instance '${instanceName}' in ${region} — " +
+                          "the instance may still be running and billing until its TTL. Output:\n${out}"
+            } else {
+                log.info "Terminated spawn instance '${instanceName}' (${region})"
+            }
         } catch (Exception e) {
-            log.warn "Failed to cancel instance '${instanceName}': ${e.message}"
+            log.error "Failed to terminate instance '${instanceName}' in ${region}: ${e.message} — " +
+                      "the instance may still be running and billing until its TTL."
         }
     }
 
@@ -872,6 +895,16 @@ class SpawnTaskHandler extends TaskHandler {
         String base = workDirUri?.endsWith('/') ? workDirUri[0..-2] : (workDirUri ?: '')
         String uri = "${base}/.exitcode"
         return ['aws', 's3', 'cp', uri, '-', '--region', (region ?: 'us-east-1')]
+    }
+
+    // buildTerminateCommand assembles the argv that destroys a task's instance.
+    // Uses `spawn terminate` (cancel is for parameter sweeps and never destroyed
+    // the per-task instance — #58) with -y to skip the irreversible-termination
+    // confirmation we can't answer over a pipe. Region is NOT a flag here:
+    // terminate reads it from AWS_REGION, which killTask sets on the subprocess.
+    @groovy.transform.PackageScope
+    static List<String> buildTerminateCommand(String instanceName) {
+        return ['spawn', 'terminate', instanceName, '-y']
     }
 
     // parseExitCode extracts the integer exit status from the .exitcode object's
