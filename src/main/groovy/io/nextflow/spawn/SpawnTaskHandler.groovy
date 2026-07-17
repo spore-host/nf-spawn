@@ -51,6 +51,18 @@ class SpawnTaskHandler extends TaskHandler {
         // blocks from S3 (~6-8 MB/s). Empty → spawn picks placement as before.
         String az           = (ext.az ?: '') as String
 
+        // Validate the constrained-format directives before they flow into the
+        // `spawn launch` argv and the user-data script (#59). These have known,
+        // narrow shapes (instance-type token, region/AZ slug, duration, ami-id),
+        // so a malformed value is a config error — reject it up front with a
+        // clear message rather than passing garbage to the CLI or the instance.
+        // NOTE: ext.setup / ext.packages / ext.container / ext.runOptions are
+        // deliberately NOT validated — they are arbitrary, config-author-supplied
+        // and run AS ROOT on the instance (see validateExtDirectives docs). That
+        // is trusted input, the same trust model as `ext.args`/`script` on any
+        // Nextflow executor; nf-spawn does not sandbox it.
+        validateExtDirectives(instanceType, region, az, ttl, ami)
+
         // Attach pre-populated EBS data volumes from snapshots, mounted read-only
         // by default — so a large reference DB (e.g. Kraken2) lives in a
         // re-snapshottable volume on a stock AMI instead of being baked into a
@@ -338,6 +350,48 @@ class SpawnTaskHandler extends TaskHandler {
     // the existing-filesystem (id) form is supported here: nf-spawn launches one
     // instance per task, so --fsx-create would create one filesystem PER task — a
     // fan-out footgun — whereas a single pre-built FS is mounted by every task.
+    // validateExtDirectives fails fast on malformed values for the constrained
+    // ext.* directives (#59). These have known, narrow shapes and flow into the
+    // `spawn launch` argv and the user-data script, so a bad value is a config
+    // error worth catching before an instance is launched.
+    //
+    // Only fixed-format fields are checked. It deliberately does NOT touch
+    // ext.setup / ext.command / ext.packages / ext.container / ext.runOptions:
+    // those are arbitrary user-supplied strings that run AS ROOT on the instance
+    // (ext.setup is spliced into the user-data bootstrap; container/runOptions
+    // into the `docker run` line). That is trusted input by design — the same
+    // trust model as `ext.args` and the task `script` on any Nextflow executor,
+    // where the pipeline/config author already controls what executes. nf-spawn
+    // does not (and cannot meaningfully) sandbox it; validation here would give a
+    // false sense of security. Document it as a root-RCE surface instead.
+    @groovy.transform.PackageScope
+    static void validateExtDirectives(String instanceType, String region, String az, String ttl, String ami) {
+        // EC2 instance type: family+size like "c7i.2xlarge", "t3.medium", "p5.48xlarge".
+        if (instanceType && !(instanceType ==~ /[a-z][a-z0-9\-]*\.[a-z0-9]+/)) {
+            throw new AbortOperationException("ext.instanceType ${asLiteral(instanceType)} is not a valid EC2 instance type (e.g. c7i.2xlarge)")
+        }
+        // AWS region slug like "us-east-1", "ap-southeast-2".
+        if (region && !(region ==~ /[a-z]{2}-[a-z]+-\d/)) {
+            throw new AbortOperationException("ext.region ${asLiteral(region)} is not a valid AWS region (e.g. us-east-1)")
+        }
+        // AZ is a region slug plus a trailing letter, e.g. "us-east-1a".
+        if (az && !(az ==~ /[a-z]{2}-[a-z]+-\d[a-z]/)) {
+            throw new AbortOperationException("ext.az ${asLiteral(az)} is not a valid availability zone (e.g. us-east-1a)")
+        }
+        // TTL: a Go-style duration of digits+unit, e.g. "2h", "90m", "36h", "7d".
+        if (ttl && !(ttl ==~ /\d+[smhdw]/)) {
+            throw new AbortOperationException("ext.ttl ${asLiteral(ttl)} is not a valid duration (e.g. 2h, 90m, 7d)")
+        }
+        // AMI id: "ami-" + hex.
+        if (ami && !(ami ==~ /ami-[0-9a-f]+/)) {
+            throw new AbortOperationException("ext.ami ${asLiteral(ami)} is not a valid AMI id (e.g. ami-0abc123...)")
+        }
+    }
+
+    // asLiteral quotes a value for an error message, making an injected/whitespace
+    // value visible rather than blending into the sentence.
+    private static String asLiteral(String s) { '"' + s + '"' }
+
     @groovy.transform.PackageScope
     static List<String> buildLaunchCommand(String instanceName, String instanceType,
                                            String region, String ttl, boolean spot,
@@ -472,14 +526,28 @@ class SpawnTaskHandler extends TaskHandler {
         return out
     }
 
-    // parseVolumeSpecs turns the `ext.volumes` directive into `spawn launch
-    // --attach-volume` argument values of the form `snap-xxx:/mount[:ro|:rw]`
-    // (#45 → spawn#144). The directive is a list of maps, each:
+    // VolumeSpec is one parsed `ext.volumes` entry: an EBS snapshot attached at a
+    // mount path, read-only by default. It's the single typed representation the
+    // three volume views (attach-volume args, docker -v flags, mount paths) all
+    // derive from, so they can't diverge in parsing or validation (#59).
+    @groovy.transform.Immutable
+    @groovy.transform.PackageScope
+    static class VolumeSpec {
+        String snapshot
+        String mount
+        boolean readOnly
+    }
+
+    // parseVolumes is the ONE parser+validator for the `ext.volumes` directive
+    // (#45 → spawn#144, consolidated in #59). The directive is a list of maps
+    // (a single map is accepted too), each:
     //   [ snapshot: 'snap-0abc', mount: '/opt/databases/kraken2', readOnly: true ]
     // `readOnly` defaults to true (the common case for shared reference data).
-    // A single map (one volume) is accepted too. Null/empty → no volumes.
+    // Null/empty → []. A malformed entry throws (fail fast, once) — the three
+    // public views below all go through here, so none can silently skip a bad
+    // entry the way the old divergent parsers did.
     @groovy.transform.PackageScope
-    static List<String> parseVolumeSpecs(Object volumes) {
+    static List<VolumeSpec> parseVolumes(Object volumes) {
         if (!volumes) return []
         List rawList
         if (volumes instanceof List) {
@@ -489,7 +557,7 @@ class SpawnTaskHandler extends TaskHandler {
         } else {
             throw new AbortOperationException("ext.volumes must be a list of maps (or a single map), got: ${volumes.getClass().name}")
         }
-        List<String> specs = []
+        List<VolumeSpec> specs = []
         for (Object o : rawList) {
             if (!(o instanceof Map)) {
                 throw new AbortOperationException("each ext.volumes entry must be a map with 'snapshot' and 'mount', got: ${o}")
@@ -500,67 +568,38 @@ class SpawnTaskHandler extends TaskHandler {
             if (!snap || !mount) {
                 throw new AbortOperationException("ext.volumes entry needs both 'snapshot' and 'mount': ${m}")
             }
-            // readOnly defaults to true; an explicit false → :rw.
+            // readOnly defaults to true; an explicit false → writable.
             boolean readOnly = m.containsKey('readOnly') ? (m.readOnly ? true : false) : true
-            specs << "${snap}:${mount}:${readOnly ? 'ro' : 'rw'}".toString()
+            specs << new VolumeSpec(snap, mount, readOnly)
         }
         return specs
     }
 
-    // volumeBindMounts turns the `ext.volumes` directive into `docker run -v`
-    // bind-mount flags so the host-attached reference volume(s) are visible
-    // INSIDE the task container at the same path — read-only when the volume is
-    // (`readOnly` default true). Mirrors parseVolumeSpecs' parsing but keys on the
-    // mount path, not the snapshot. Returns '' when there are no volumes (#49 /
-    // nf-spawn#51).
+    // parseVolumeSpecs → `spawn launch --attach-volume` values of the form
+    // `snap-xxx:/mount[:ro|:rw]` (#45 → spawn#144).
     @groovy.transform.PackageScope
-    static String volumeBindMounts(Object volumes) {
-        if (!volumes) return ''
-        List rawList
-        if (volumes instanceof List) {
-            rawList = volumes as List
-        } else if (volumes instanceof Map) {
-            rawList = [volumes]
-        } else {
-            return ''
+    static List<String> parseVolumeSpecs(Object volumes) {
+        return parseVolumes(volumes).collect { VolumeSpec v ->
+            "${v.snapshot}:${v.mount}:${v.readOnly ? 'ro' : 'rw'}".toString()
         }
-        List<String> flags = []
-        for (Object o : rawList) {
-            if (!(o instanceof Map)) continue
-            Map m = o as Map
-            String mount = (m.mount ?: m.mountPoint ?: '') as String
-            if (!mount) continue
-            boolean readOnly = m.containsKey('readOnly') ? (m.readOnly ? true : false) : true
-            String suffix = readOnly ? ':ro' : ''
-            flags << "-v ${shellQuote(mount + ':' + mount + suffix)}".toString()
-        }
-        return flags.join(' ')
     }
 
-    // volumeMountPaths extracts just the mount paths from `ext.volumes`
-    // (e.g. ["/opt/databases/metaphlan", "/opt/databases/kraken2"]). Used to
-    // match a declared input's stage name against an attached reference volume so
-    // we can symlink to the mount instead of copying the (possibly huge) DB that
-    // Nextflow staged into the S3 work area (#55).
+    // volumeBindMounts → `docker run -v` bind-mount flags so the host-attached
+    // reference volume(s) are visible INSIDE the task container at the same path,
+    // read-only when the volume is (#49 / nf-spawn#51). Returns '' when empty.
+    @groovy.transform.PackageScope
+    static String volumeBindMounts(Object volumes) {
+        return parseVolumes(volumes).collect { VolumeSpec v ->
+            "-v ${shellQuote(v.mount + ':' + v.mount + (v.readOnly ? ':ro' : ''))}".toString()
+        }.join(' ')
+    }
+
+    // volumeMountPaths → just the mount paths (e.g. ["/opt/databases/kraken2"]),
+    // used to match a declared input's stage name against an attached reference
+    // volume for the zero-copy symlink short-circuit (#55).
     @groovy.transform.PackageScope
     static List<String> volumeMountPaths(Object volumes) {
-        if (!volumes) return []
-        List rawList
-        if (volumes instanceof List) {
-            rawList = volumes as List
-        } else if (volumes instanceof Map) {
-            rawList = [volumes]
-        } else {
-            return []
-        }
-        List<String> mounts = []
-        for (Object o : rawList) {
-            if (!(o instanceof Map)) continue
-            Map m = o as Map
-            String mount = (m.mount ?: m.mountPoint ?: '') as String
-            if (mount) mounts << mount
-        }
-        return mounts
+        return parseVolumes(volumes).collect { VolumeSpec v -> v.mount }
     }
 
     // baseName returns the last path segment of p (trailing slashes ignored),
@@ -663,14 +702,17 @@ class SpawnTaskHandler extends TaskHandler {
         // with "No space left on device" long before the 80 GB root fills (#27).
         sb << 'LOCAL_DIR=/var/lib/nf-work\n\n'
         sb << 'sudo mkdir -p "${LOCAL_DIR}" && sudo chown "$(id -u):$(id -g)" "${LOCAL_DIR}"\n'
-        // The staging script runs as root (EC2 user-data), so ${LOCAL_DIR} and
-        // the staged files are root-owned. A containerized task whose image runs
-        // as a NON-root default user (the norm for biocontainers/nf-core) then
-        // can't create the symlinks .command.sh makes or write outputs into the
-        // work dir → "Permission denied" (#39). World-writable the dir so the
-        // container's user can write regardless of whether --user is set. (The
-        // dir is on an ephemeral instance that's terminated after the task.)
-        sb << 'chmod 0777 "${LOCAL_DIR}"\n'
+        // Only a CONTAINERIZED task needs the work dir world-writable (#59). The
+        // staging script runs as root (EC2 user-data), so ${LOCAL_DIR} is
+        // root-owned (well, chowned to the invoking uid above); a container image
+        // whose default user is NON-root (the norm for biocontainers/nf-core)
+        // then can't create .command.sh's symlinks or write outputs → "Permission
+        // denied" (#39), so we relax it for that case. A bare-OS task runs as the
+        // dir's own owner and needs no relaxation, so we DON'T weaken permissions
+        // there. (The dir is on an ephemeral instance terminated after the task.)
+        if (container?.trim()) {
+            sb << 'chmod 0777 "${LOCAL_DIR}"\n'
+        }
 
         // 0. Per-task setup, BEFORE staging/running — installs Docker + any host
         //    tools so a STOCK AL2023 AMI works without a custom tools-baked AMI
@@ -764,10 +806,19 @@ class SpawnTaskHandler extends TaskHandler {
             // bind-mounted into the container, so the symlink resolves inside it.
             final String mountForStage = mountByBase[baseName(stageName)]
             if (mountForStage) {
+                // #59: this match is by BASENAME only, so an input whose stage-name
+                // basename coincidentally equals a mount's basename would be
+                // symlinked onto the reference volume and its real copy skipped —
+                // silently serving the wrong data. Basename matching is intended
+                // (taxprofiler-style pipelines stage db_path into S3, so the source
+                // URI never equals the mount), but the substitution is surprising,
+                // so LOG it (stderr, lands in .command.err / the launch log) so a
+                // wrong match is diagnosable rather than silent.
                 final destParent = stageName.contains('/') ? stageName.substring(0, stageName.lastIndexOf('/')) : ''
                 if (destParent) {
                     sb << "mkdir -p \"\${LOCAL_DIR}/\"${shellQuote(destParent)}\n"
                 }
+                sb << "echo \"nf-spawn: input '${stageName}' → ext.volumes mount ${mountForStage} (basename match; symlinked, copy skipped)\" >&2\n"
                 sb << "if [ -e ${shellQuote(mountForStage)} ]; then ln -sfn ${shellQuote(mountForStage)} \"\${LOCAL_DIR}/\"${shellQuote(stageName)}; else echo \"nf-spawn: ext.volumes mount ${mountForStage} not present for input ${stageName}\" >&2; exit 1; fi\n"
                 return
             }

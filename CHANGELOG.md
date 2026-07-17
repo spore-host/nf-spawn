@@ -9,23 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **Validate the constrained `ext.*` directives before launch** (#59). `ext.instanceType`,
+  `ext.region`, `ext.az`, `ext.ttl`, and `ext.ami` now fail fast with a clear error
+  if malformed (they have known narrow shapes and flow into the `spawn launch`
+  argv), instead of passing garbage to the CLI or the instance. NOTE: `ext.setup`,
+  `ext.command`, `ext.packages`, `ext.container`, and `ext.runOptions` are
+  deliberately **not** validated — they are arbitrary strings that run *as root*
+  on the instance by design (the same trust model as `ext.args`/`script` on any
+  Nextflow executor); this is documented in the code as a root-RCE surface.
+- **Work dir is only made world-writable (`chmod 0777`) for containerized tasks** (#59).
+  A bare-OS task runs as the dir's own owner and no longer gets a world-writable
+  work dir; the relaxation stays only for the container case (where a non-root
+  image user must write into the root-staged dir).
+- The staging temp file (which contains the full task script) is now deleted
+  after `spawn launch` reads it, instead of accumulating in the system temp dir
+  (#59).
 - **Pinned all GitHub Actions to commit SHAs** (with version comments) across
   the CI/security/release workflows, and pinned `trivy-action` from `@master`
   to a release. Clears the Semgrep `github-actions-mutable-action-tag` finding
   and hardens the CI supply chain.
-
-### Security
-- The staging temp file (which contains the full task script) is now deleted
-  after `spawn launch` reads it, instead of accumulating in the system temp dir
-  (#59).
 
 ### Changed
 - CI now runs the Spock test suite (`./gradlew test`), which was previously never
   executed — the build only ran `assemble` (#59).
 - Dropped a redundant `ProcessBuilder.environment().putAll(System.getenv())` in
   task submission; ProcessBuilder already inherits the parent environment (#59).
+- Internal: `ext.volumes` is now parsed once into a typed `VolumeSpec` list that
+  the three views (`--attach-volume` args, docker `-v` flags, mount paths) derive
+  from, instead of three separate traversals with divergent error handling (#59).
 
 ### Fixed
+- The zero-copy symlink substitution for an `ext.volumes`-backed reference DB is
+  now logged (stderr) when it fires (#59). The match is by basename, so an input
+  whose stage-name basename coincidentally equals a mount's is symlinked onto the
+  volume and its copy skipped — announcing each substitution makes a wrong match
+  diagnosable instead of silently serving the wrong data.
 - A failed output up-sync no longer reports as a successful task (#59). The
   staging script wrote `.exitcode` before syncing outputs to S3, so a sync
   failure still left the task's own (often 0) exit code — Nextflow then
