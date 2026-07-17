@@ -720,4 +720,67 @@ class SpawnTaskHandlerTest extends Specification {
         // killTask sets on the subprocess environment.
         !cmd.contains('--region')
     }
+
+    def 'validateExtDirectives accepts well-formed values (#59)'() {
+        when:
+        SpawnTaskHandler.validateExtDirectives('c7i.2xlarge', 'us-east-1', 'us-east-1a', '2h', 'ami-0abc123def')
+
+        then:
+        noExceptionThrown()
+    }
+
+    def 'validateExtDirectives accepts empty/defaulted az and ami (#59)'() {
+        when: 'empty ami/az are the unset case and must not error'
+        SpawnTaskHandler.validateExtDirectives('t3.medium', 'us-west-2', '', '90m', '')
+
+        then:
+        noExceptionThrown()
+    }
+
+    def 'validateExtDirectives rejects malformed #field (#59)'() {
+        when:
+        SpawnTaskHandler.validateExtDirectives(instanceType, region, az, ttl, ami)
+
+        then:
+        def e = thrown(nextflow.exception.AbortOperationException)
+        e.message.contains(field)
+
+        where:
+        field              | instanceType | region      | az          | ttl   | ami
+        'ext.instanceType' | 'c7i;rm -rf' | 'us-east-1' | ''          | '2h'  | ''
+        'ext.instanceType' | 'notatype'   | 'us-east-1' | ''          | '2h'  | ''
+        'ext.region'       | 't3.medium'  | 'useast1'   | ''          | '2h'  | ''
+        'ext.az'           | 't3.medium'  | 'us-east-1' | 'us-east-1' | '2h'  | ''
+        'ext.ttl'          | 't3.medium'  | 'us-east-1' | ''          | '2 h' | ''
+        'ext.ttl'          | 't3.medium'  | 'us-east-1' | ''          | 'foo' | ''
+        'ext.ami'          | 't3.medium'  | 'us-east-1' | ''          | '2h'  | 'ami-XYZ'
+        'ext.ami'          | 't3.medium'  | 'us-east-1' | ''          | '2h'  | 'notanami'
+    }
+
+    def 'staging script only world-writes the work dir for a container task (#59)'() {
+        when: 'bare-OS task (no container) runs as the dir owner — no chmod 0777'
+        def bare = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'echo hi', '')
+
+        then:
+        !bare.contains('chmod 0777')
+
+        when: 'containerized task needs the dir world-writable for a non-root image user'
+        def ctr = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'echo hi', 'img:1')
+
+        then:
+        ctr.contains('chmod 0777 "${LOCAL_DIR}"')
+    }
+
+    def 'buildInputStaging logs the basename-match substitution so a wrong match is visible (#59)'() {
+        given:
+        Map<String, Path> inputs = ['kraken2': java.nio.file.Paths.get('/tmp/kraken2')]
+        def mounts = ['/opt/databases/kraken2']
+
+        when:
+        def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'kraken2', 'img:1', inputs, '', '', mounts)
+
+        then: 'the symlink substitution is announced to stderr'
+        script.contains("input 'kraken2'")
+        script.contains('basename match')
+    }
 }
