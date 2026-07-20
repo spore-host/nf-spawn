@@ -1,5 +1,6 @@
 package io.nextflow.spawn
 
+import groovy.json.JsonOutput
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import nextflow.exception.AbortOperationException
@@ -16,9 +17,12 @@ import java.nio.file.Path
 class SpawnTaskHandler extends TaskHandler {
 
     private final SpawnExecutor executor
-    private String instanceName
+    // The spawn task id (also the instance name + completion-record key). Captured
+    // at submit() so completion can be polled via `spawn task status` even after
+    // the instance has terminated.
+    private String taskId
     private Process launchProcess
-    // Captured at submit() so completion can be detected from the durable S3
+    // Captured at submit() so completion can also be detected from the durable S3
     // work dir (.exitcode) even after the instance has terminated (#34).
     private String workDirUri
     private String region
@@ -30,8 +34,9 @@ class SpawnTaskHandler extends TaskHandler {
 
     @Override
     void submit() {
-        // Derive a short, valid instance name from the task hash
-        instanceName = "nf-${task.hash.toString().take(12)}"
+        // Derive a short, valid task id (= instance name + completion-record key)
+        // from the task hash.
+        taskId = "nf-${task.hash.toString().take(12)}"
 
         // Get configuration from task ext properties. TaskConfig.ext is an
         // untyped map, so under @CompileStatic we access it via a Map cast +
@@ -81,7 +86,7 @@ class SpawnTaskHandler extends TaskHandler {
         Map fsx = parseSharedFs(ext.fsx, '/fsx')
         Map efs = parseSharedFs(ext.efs, '/efs')
 
-        log.info "Submitting task '${task.name}' to spawn instance '${instanceName}' (${instanceType} in ${region})"
+        log.info "Submitting task '${task.name}' via `spawn task run` '${taskId}' (${instanceType} in ${region})"
 
         // task.workDir is the directory Nextflow reads back after the task to
         // bind outputs (.exitcode + declared output files). For the spawn
@@ -149,39 +154,49 @@ class SpawnTaskHandler extends TaskHandler {
         // mounts resolves zero-copy.
         List<String> mountPaths = volumeMountPaths(ext.volumes) + sharedFsMountPaths([fsx, efs])
 
-        // Write the staging script to a temp file shipped as instance user-data.
-        // It contains the full task script, so delete it once spawn has read it
-        // into the launch (in a finally) rather than leaving it in /tmp (#59).
-        Path scriptFile = Files.createTempFile("nf-spawn-${instanceName}-", ".sh")
-        scriptFile.toFile().deleteOnExit() // backstop if the finally is bypassed
+        // The staging script IS the task command: it stages the S3 work dir down,
+        // localizes declared inputs (#37), runs the (optionally containerized) task
+        // capturing .exitcode, and syncs outputs back. Under `spawn task run` this
+        // runs as the instance's login user (spawn wraps it in `su - <user>`); the
+        // script sudo's its own privileged steps, exactly as it did under user-data.
+        // spawn owns launch, sizing, the durable completion record, and
+        // self-termination — nf-spawn no longer calls `spawn launch` or builds a
+        // scoped policy; it hands spawn a TaskSpec (spawn#386 adapter migration).
+        String stagingScript = buildStagingScript(workDirUri, region, task.script, container, task.getInputFilesMap(), runOptions, setup, mountPaths, false)
+
+        Map spec = buildTaskSpec(taskId, stagingScript, instanceType, ttl, spot, workDirUri,
+                                 ami, az, attachVolumes, fsx, efs)
+
+        // Write the TaskSpec JSON to a temp file; delete it once spawn has read it
+        // (in a finally) rather than leaving it in /tmp (#59).
+        Path specFile = Files.createTempFile("nf-spawn-${taskId}-", ".json")
+        specFile.toFile().deleteOnExit() // backstop if the finally is bypassed
         String output
         int exitCode
         try {
-            scriptFile.toFile().text = buildStagingScript(workDirUri, region, task.script, container, task.getInputFilesMap(), runOptions, setup, mountPaths)
-            scriptFile.toFile().setExecutable(true)
+            specFile.toFile().text = JsonOutput.toJson(spec)
 
-            // Build the spawn launch command
-            List<String> cmd = buildLaunchCommand(instanceName, instanceType, region, ttl, spot, scriptFile.toString(), ami, volumeSize, attachVolumes, az, fsx, efs)
+            // Launch DETACHED (no --wait): spawn sizes, launches, and the instance
+            // writes its own completion record. Nextflow's TaskPollingMonitor drives
+            // completion via checkIfCompleted() polling `spawn task status`, so a
+            // blocking --wait would stall the monitor thread (#31).
+            List<String> cmd = buildTaskRunCommand(specFile.toString(), region)
+            log.debug "spawn task run command: ${cmd.join(' ')}"
 
-            log.debug "spawn launch command: ${cmd.join(' ')}"
-
-            // ProcessBuilder already inherits the parent process environment, so
-            // there's no need to copy System.getenv() in explicitly.
             ProcessBuilder pb = new ProcessBuilder(cmd)
             pb.redirectErrorStream(true)
-
             launchProcess = pb.start()
             output = launchProcess.inputStream.text
             exitCode = launchProcess.waitFor()
         } finally {
-            Files.deleteIfExists(scriptFile)
+            Files.deleteIfExists(specFile)
         }
 
         if (exitCode != 0) {
-            throw new AbortOperationException("spawn launch failed (exit $exitCode) for task '${task.name}':\n${output}")
+            throw new AbortOperationException("spawn task run failed (exit $exitCode) for task '${task.name}':\n${output}")
         }
 
-        log.debug "spawn launch output for '${instanceName}':\n${output}"
+        log.debug "spawn task run output for '${taskId}':\n${output}"
         // Leave status SUBMITTED. Nextflow's TaskPollingMonitor drives the
         // SUBMITTED→RUNNING transition via checkIfRunning(); pre-setting RUNNING
         // here bypasses notifyTaskStart(), so the task is never counted as
@@ -199,18 +214,17 @@ class SpawnTaskHandler extends TaskHandler {
         if (status != TaskStatus.SUBMITTED) {
             return status == TaskStatus.RUNNING
         }
-        // Fast-finishing tasks may produce .exitcode (and terminate the
-        // instance) before we ever observe RUNNING. If the durable signal is
-        // already present, promote to RUNNING so the next checkIfCompleted()
-        // tick finalizes it — otherwise checkIfRunning would SSH a dead box and
-        // get rc=3 forever, stranding the task in SUBMITTED (#34).
+        // Fast-finishing tasks may produce the completion record before we ever
+        // observe RUNNING. If the durable signal is already present, promote to
+        // RUNNING so the next checkIfCompleted() tick finalizes it.
         if (readExitCodeFromS3() != null) {
             status = TaskStatus.RUNNING
             return true
         }
-        // --check-complete exits 2 (running), 0/1 (done), 3 (not yet reachable).
-        // Any of 0/1/2 means the instance is up and the task is underway →
-        // transition to RUNNING. 3 means spored/SSH isn't ready yet — stay SUBMITTED.
+        // `spawn task status --check-complete` exits 0/1 (done), 2 (running), 3
+        // (no record / error). 0/1/2 all mean the task exists and is underway →
+        // transition to RUNNING. 3 means the completion record isn't there yet —
+        // stay SUBMITTED (the instance is still sizing/booting).
         int rc = spawnCheckComplete()
         if (rc == 3) {
             return false
@@ -241,9 +255,9 @@ class SpawnTaskHandler extends TaskHandler {
             return false  // .exitcode not present yet — task still running
         }
         if (exit == 0) {
-            log.info "Task '${task.name}' completed (exit 0) on instance '${instanceName}'"
+            log.info "Task '${task.name}' completed (exit 0) on instance '${taskId}'"
         } else {
-            log.warn "Task '${task.name}' failed (exit ${exit}) on instance '${instanceName}'"
+            log.warn "Task '${task.name}' failed (exit ${exit}) on instance '${taskId}'"
         }
         task.exitStatus = exit
         status = TaskStatus.COMPLETED
@@ -269,7 +283,7 @@ class SpawnTaskHandler extends TaskHandler {
             }
             return parseExitCode(out)
         } catch (Exception e) {
-            log.debug "Error reading .exitcode for '${instanceName}': ${e.message}"
+            log.debug "Error reading .exitcode for '${taskId}': ${e.message}"
             return null
         }
     }
@@ -278,7 +292,7 @@ class SpawnTaskHandler extends TaskHandler {
     // kill() on the base now delegates to it (#9).
     @Override
     protected void killTask() {
-        log.info "Terminating spawn instance '${instanceName}' (${region}) for task '${task.name}'"
+        log.info "Terminating spawn instance '${taskId}' (${region}) for task '${task.name}'"
 
         // Use `spawn terminate`, not `spawn cancel`: cancel operates on parameter
         // sweeps, so it never destroyed the per-task instance — the box billed
@@ -289,7 +303,7 @@ class SpawnTaskHandler extends TaskHandler {
         // irreversible-termination confirmation we can't answer over a pipe.
         // A failed terminate leaks a billable instance, so treat a non-zero exit
         // as an error, not a warning (#58).
-        List<String> cmd = buildTerminateCommand(instanceName)
+        List<String> cmd = buildTerminateCommand(taskId)
         try {
             ProcessBuilder pb = new ProcessBuilder(cmd)
             pb.redirectErrorStream(true)
@@ -301,13 +315,13 @@ class SpawnTaskHandler extends TaskHandler {
             String out = p.inputStream.text
             int rc = p.waitFor()
             if (rc != 0) {
-                log.error "spawn terminate failed (exit ${rc}) for instance '${instanceName}' in ${region} — " +
+                log.error "spawn terminate failed (exit ${rc}) for instance '${taskId}' in ${region} — " +
                           "the instance may still be running and billing until its TTL. Output:\n${out}"
             } else {
-                log.info "Terminated spawn instance '${instanceName}' (${region})"
+                log.info "Terminated spawn instance '${taskId}' (${region})"
             }
         } catch (Exception e) {
-            log.error "Failed to terminate instance '${instanceName}' in ${region}: ${e.message} — " +
+            log.error "Failed to terminate instance '${taskId}' in ${region}: ${e.message} — " +
                       "the instance may still be running and billing until its TTL."
         }
     }
@@ -391,6 +405,90 @@ class SpawnTaskHandler extends TaskHandler {
     // asLiteral quotes a value for an error message, making an injected/whitespace
     // value visible rather than blending into the sentence.
     private static String asLiteral(String s) { '"' + s + '"' }
+
+    // buildTaskSpec maps a task to the spawn TaskSpec contract (spawn#386). The
+    // staging script becomes the command (wrapped in `bash -lc` so spawn runs it
+    // verbatim, host or container-agnostic — nf-spawn does its OWN docker run
+    // inside the script, so spec.container is deliberately NOT set). ext.* launch
+    // directives map onto the placement block (spawn ≥ 0.84.0); ext.instanceType
+    // is an EXACT type, so it pins resources.instance_type (spawn#413) — a
+    // family-only hint would size to the cheapest in-family (t3.medium→t3.nano).
+    // The workDir bucket is declared in resources.s3_read_write so the scoped
+    // instance profile grants the ListBucket + object access the staging script's
+    // `aws s3 sync`/`cp` need (nf-spawn does the I/O, not spawn's wrapper — so
+    // there are no inputs/outputs manifests).
+    @groovy.transform.PackageScope
+    static Map buildTaskSpec(String taskId, String stagingScript, String instanceType,
+                             String ttl, boolean spot, String workDirUri,
+                             String ami, String az, List<String> attachVolumes,
+                             Map fsx, Map efs) {
+        Map<String, Object> resources = [:]
+        if (instanceType) {
+            resources.instance_type = instanceType
+        }
+        if (spot) {
+            resources.purchase = 'spot'
+            resources.fallback = 'on_demand'
+        }
+        String bucket = s3BucketUri(workDirUri)
+        if (bucket) {
+            resources.s3_read_write = [bucket]
+        }
+
+        Map<String, Object> placement = [:]
+        if (ami) placement.ami = ami
+        if (az)  placement.availability_zone = az
+        List<Map> volumes = []
+        for (String v : (attachVolumes ?: [])) {
+            // v is "snap-xxx:/mount[:ro|:rw]" (parseVolumeSpecs output).
+            Map vr = parseAttachVolumeSpec(v)
+            if (vr) volumes << vr
+        }
+        if (volumes) placement.volumes = volumes
+        if (fsx?.id) placement.fsx_lustre_id = fsx.id as String
+        if (efs?.id) placement.efs_id = efs.id as String
+
+        Map<String, Object> spec = [
+            task_id  : taskId,
+            command  : ['/bin/bash', '-lc', stagingScript],
+            resources: resources,
+            lifecycle: [ttl: ttl, on_complete: 'terminate'],
+        ]
+        if (placement) spec.placement = placement
+        return spec
+    }
+
+    // s3BucketUri returns the bucket-root URI (s3://bucket) of an s3:// URI, or ''
+    // — declared in resources.s3_read_write so spawn scopes the grant to the whole
+    // work bucket.
+    @groovy.transform.PackageScope
+    static String s3BucketUri(String uri) {
+        if (!uri?.startsWith('s3://')) return ''
+        String rest = uri.substring('s3://'.length())
+        int slash = rest.indexOf('/')
+        String bucket = slash >= 0 ? rest.substring(0, slash) : rest
+        return bucket ? "s3://${bucket}".toString() : ''
+    }
+
+    // parseAttachVolumeSpec parses a "snap-xxx:/mount[:ro|:rw]" attach-volume value
+    // into a placement.volumes entry {snapshot, mount_path, read_only}.
+    @groovy.transform.PackageScope
+    static Map parseAttachVolumeSpec(String v) {
+        if (!v) return null
+        List<String> parts = v.split(':') as List
+        if (parts.size() < 2) return null
+        String snap = parts[0]
+        String mount = parts[1]
+        boolean ro = parts.size() >= 3 && parts[2] == 'ro'
+        return [snapshot: snap, mount_path: mount, read_only: ro]
+    }
+
+    // buildTaskRunCommand assembles the `spawn task run` argv (detached — no
+    // --wait; completion is polled via `spawn task status`).
+    @groovy.transform.PackageScope
+    static List<String> buildTaskRunCommand(String specPath, String region) {
+        return ['spawn', 'task', 'run', '--spec', specPath, '--region', region]
+    }
 
     @groovy.transform.PackageScope
     static List<String> buildLaunchCommand(String instanceName, String instanceType,
@@ -691,8 +789,16 @@ class SpawnTaskHandler extends TaskHandler {
         return (packages as String).split(/[,\s]+/).collect { it.trim() }.findAll { it }
     }
 
+    // signalCompletion: when true (the legacy `spawn launch` user-data path), the
+    // script ends by signaling spored (`spored complete` / touch SPAWN_COMPLETE) so
+    // on_complete fires. Under `spawn task run` (spawn#386) the WRAPPER owns
+    // completion signaling — writing SPAWN_COMPLETE here mid-command would race the
+    // wrapper's own SPAWN_COMPLETE (written after stage-out + completion.json) and
+    // could terminate the box before the completion record uploads. So the task-run
+    // path passes false and the script instead `exit`s with the task's real code,
+    // which the wrapper records.
     @groovy.transform.PackageScope
-    static String buildStagingScript(String workDirUri, String region, String taskScript, String container, Map<String, Path> inputs = [:], String runOptions = '', String setup = '', List<String> mountPaths = []) {
+    static String buildStagingScript(String workDirUri, String region, String taskScript, String container, Map<String, Path> inputs = [:], String runOptions = '', String setup = '', List<String> mountPaths = [], boolean signalCompletion = true) {
         StringBuilder sb = new StringBuilder('#!/bin/bash\n')
         sb << 'set -uo pipefail\n\n'
         sb << "WORKDIR_S3=${shellQuote(workDirUri)}\n"
@@ -767,8 +873,14 @@ class SpawnTaskHandler extends TaskHandler {
         // tasks looked complete (and successful) right after boot. Now the
         // status is success/failed per ${TASK_RC}, so --check-complete returns
         // 0 only on a genuinely successful task and 1 on failure.
-        sb << 'if [ "${TASK_RC}" -eq 0 ]; then COMPLETE_STATUS=success; else COMPLETE_STATUS=failed; fi\n'
-        sb << 'spored complete --status "${COMPLETE_STATUS}" 2>/dev/null || touch /tmp/SPAWN_COMPLETE\n'
+        if (signalCompletion) {
+            sb << 'if [ "${TASK_RC}" -eq 0 ]; then COMPLETE_STATUS=success; else COMPLETE_STATUS=failed; fi\n'
+            sb << 'spored complete --status "${COMPLETE_STATUS}" 2>/dev/null || touch /tmp/SPAWN_COMPLETE\n'
+        } else {
+            // task-run path: the wrapper owns completion. Exit with the task's real
+            // code so the wrapper's completion record carries the right status.
+            sb << 'exit "${TASK_RC}"\n'
+        }
 
         return sb.toString()
     }
@@ -1066,14 +1178,16 @@ class SpawnTaskHandler extends TaskHandler {
 
     private int spawnCheckComplete() {
         try {
-            Process p = new ProcessBuilder(['spawn', 'status', instanceName, '--check-complete'])
-                .redirectErrorStream(true)
-                .start()
+            ProcessBuilder pb = new ProcessBuilder(
+                ['spawn', 'task', 'status', taskId, '--region', region, '--check-complete'])
+            pb.redirectErrorStream(true)
+            Process p = pb.start()
+            p.inputStream.text  // drain so the process can exit
             p.waitFor()
             return p.exitValue()
         } catch (Exception e) {
-            log.debug "Error running spawn status for '${instanceName}': ${e.message}"
-            return 3  // error
+            log.debug "Error running spawn task status for '${taskId}': ${e.message}"
+            return 3  // error / no record yet
         }
     }
 }
