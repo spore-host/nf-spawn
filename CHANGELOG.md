@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **nf-spawn now dispatches each task through `spawn task run`** instead of calling
+  `spawn launch` itself (spawn#386 adapter migration). `submit()` builds a spawn
+  **TaskSpec** and runs `spawn task run` (detached); `checkIfRunning()` polls
+  `spawn task status --check-complete`; completion is still read from the durable
+  `.exitcode` in the S3 work dir. spawn now owns the launch, sizing, the durable
+  completion record, self-termination, and a **scoped least-privilege instance
+  profile** — the work bucket is declared in the TaskSpec's `resources.s3_read_write`
+  so the profile grants exactly the S3 access the staging script's
+  `aws s3 sync`/`cp` need. nf-spawn keeps its own staging script (input
+  localization #37, the zero-copy symlink short-circuits #55/#49, and its own
+  `docker run`) — that becomes the TaskSpec `command`, so all the nf-core staging
+  behavior is preserved. `ext.instanceType` maps to `resources.instance_type` (an
+  **exact** pin, spawn#413), and `ext.ami`/`ext.az`/`ext.volumes`/`ext.fsx`/`ext.efs`
+  map onto the TaskSpec `placement` block. **Requires spawn ≥ 0.85.0.**
+- `killTask()` now terminates by task id via `spawn terminate <task-id>`.
+
 ### Security
 - **Validate the constrained `ext.*` directives before launch** (#59). `ext.instanceType`,
   `ext.region`, `ext.az`, `ext.ttl`, and `ext.ami` now fail fast with a clear error

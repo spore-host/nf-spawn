@@ -6,6 +6,96 @@ import java.nio.file.Path
 
 class SpawnTaskHandlerTest extends Specification {
 
+    // --- spawn#386 task-run adapter migration ---
+
+    def 'buildTaskSpec pins the exact instance type and declares the work bucket (spawn#386/#413)'() {
+        when:
+        def spec = SpawnTaskHandler.buildTaskSpec(
+            'nf-abc123', '#!/bin/bash\necho hi\n', 'c7i.4xlarge', '2h', false,
+            's3://my-bucket/work/ab/cdef', '', '', [], [:], [:])
+
+        then: 'the staging script is the command, wrapped in bash -lc'
+        spec.command == ['/bin/bash', '-lc', '#!/bin/bash\necho hi\n']
+
+        and: 'ext.instanceType pins the EXACT type (not a lossy family hint → t3.nano)'
+        spec.resources.instance_type == 'c7i.4xlarge'
+
+        and: 'the work bucket is declared for the scoped IAM (nf-spawn does its own S3 I/O)'
+        spec.resources.s3_read_write == ['s3://my-bucket']
+
+        and: 'lifecycle terminates on completion with the TTL backstop'
+        spec.lifecycle == [ttl: '2h', on_complete: 'terminate']
+
+        and: 'nf-spawn runs its OWN docker — spec.container is NOT set'
+        !spec.containsKey('container')
+
+        and: 'no placement block when no ext.ami/az/volumes/fsx/efs'
+        !spec.containsKey('placement')
+    }
+
+    def 'buildTaskSpec maps ext.* launch directives onto the placement block (spawn#386)'() {
+        when:
+        def spec = SpawnTaskHandler.buildTaskSpec(
+            'nf-abc123', 's', 't3.medium', '2h', true, 's3://b/w',
+            'ami-0abc', 'us-east-1a', ['snap-0aaa:/ref:ro', 'snap-0bbb:/data:rw'],
+            [id: 'fs-fsx', mount: '/fsx'], [id: 'fs-efs', mount: '/efs'])
+
+        then: 'spot maps to purchase + fallback'
+        spec.resources.purchase == 'spot'
+        spec.resources.fallback == 'on_demand'
+
+        and: 'ami/az → placement'
+        spec.placement.ami == 'ami-0abc'
+        spec.placement.availability_zone == 'us-east-1a'
+
+        and: 'ext.volumes → placement.volumes with read-only flags'
+        spec.placement.volumes == [
+            [snapshot: 'snap-0aaa', mount_path: '/ref', read_only: true],
+            [snapshot: 'snap-0bbb', mount_path: '/data', read_only: false],
+        ]
+
+        and: 'fsx/efs ids → placement'
+        spec.placement.fsx_lustre_id == 'fs-fsx'
+        spec.placement.efs_id == 'fs-efs'
+    }
+
+    def 's3BucketUri returns the bucket root, or empty for a non-s3 uri'() {
+        expect:
+        SpawnTaskHandler.s3BucketUri('s3://bkt/work/ab/cd') == 's3://bkt'
+        SpawnTaskHandler.s3BucketUri('s3://bkt') == 's3://bkt'
+        SpawnTaskHandler.s3BucketUri('/local/work') == ''
+    }
+
+    def 'buildTaskRunCommand dispatches detached (no --wait)'() {
+        when:
+        def cmd = SpawnTaskHandler.buildTaskRunCommand('/tmp/spec.json', 'us-east-1')
+
+        then:
+        cmd == ['spawn', 'task', 'run', '--spec', '/tmp/spec.json', '--region', 'us-east-1']
+        !cmd.contains('--wait')
+    }
+
+    def 'staging script under task-run does NOT signal spored (the wrapper owns completion)'() {
+        when: 'task-run path (signalCompletion=false)'
+        def taskRun = SpawnTaskHandler.buildStagingScript(
+            's3://b/w', 'us-east-1', 'echo hi', '', [:], '', '', [], false)
+        and: 'legacy user-data path (signalCompletion=true, the default)'
+        def legacy = SpawnTaskHandler.buildStagingScript(
+            's3://b/w', 'us-east-1', 'echo hi', '', [:], '', '', [], true)
+
+        then: 'task-run exits with the real code and never touches SPAWN_COMPLETE (which would race the wrapper)'
+        taskRun.contains('exit "${TASK_RC}"')
+        !taskRun.contains('SPAWN_COMPLETE')
+        !taskRun.contains('spored complete')
+
+        and: 'the legacy path still signals spored as before'
+        legacy.contains('spored complete')
+        legacy.contains('SPAWN_COMPLETE')
+    }
+
+    // --- legacy `spawn launch` argv helpers (retained for back-compat; submit()
+    //     now dispatches via buildTaskRunCommand above) ---
+
     def 'passes the task script via --user-data-file, not a bare --user-data path (#13)'() {
         when:
         def cmd = SpawnTaskHandler.buildLaunchCommand(
