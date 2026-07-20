@@ -32,7 +32,7 @@ Add to `nextflow.config`:
 
 ```groovy
 plugins {
-    id 'nf-spawn@0.8.0'
+    id 'nf-spawn@0.9.0'
 }
 ```
 
@@ -46,7 +46,7 @@ Or install locally during development:
 ```groovy
 // nextflow.config
 plugins {
-    id 'nf-spawn@0.8.0'
+    id 'nf-spawn@0.9.0'
 }
 
 process {

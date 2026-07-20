@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-19
+
 ### Changed
 - **nf-spawn now dispatches each task through `spawn task run`** instead of calling
   `spawn launch` itself (spawn#386 adapter migration). `submit()` builds a spawn
@@ -258,7 +260,8 @@ Baseline. Earlier history is in the
 
 ---
 
-[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/spore-host/nf-spawn/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/spore-host/nf-spawn/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/spore-host/nf-spawn/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/spore-host/nf-spawn/compare/v0.5.0...v0.6.0
