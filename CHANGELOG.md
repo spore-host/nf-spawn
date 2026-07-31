@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Pooled execution mode for wide fan-out — `spawn.pool` (#70).** Opt-in
+  (`spawn.pool.enabled = true`), off by default. Instead of launching one
+  ephemeral instance per task, nf-spawn provisions a fixed set of **fungible
+  worker instances** once per run that drain a shared queue, reusing across jobs —
+  so short tasks stop paying a full instance boot each and the fan-out isn't
+  capped by launch rate (the root cause measured in #70: ~60/108 concurrent,
+  5m44s to dispatch). A new run-scoped lifecycle observer
+  (`SpawnPoolObserver`, a Nextflow `TraceObserverV2`) runs `spawn pool create`
+  at run start and `spawn pool drain` at run end; `submit()` enqueues each task
+  via `spawn pool submit` (S3 stage + one SQS send — no launch) rather than
+  `spawn task run`. Completion detection is unchanged — a pooled worker writes the
+  same `.exitcode`/`completion.json` to the S3 work dir. Config:
+  `spawn.pool { enabled; workers; minViable; instanceType; spot; idleTimeout; ttl }`.
+  Provisioning is **best-effort** (asks for `workers`, proceeds with `minViable` —
+  fewer workers means lower parallelism, never a failed run), workers self-drain
+  on idle-timeout (scale to zero), and the queue is deleted at run end. Pool mode
+  is **homogeneous** (one worker `instanceType`), so per-process `ext.instanceType`
+  heterogeneity is not honored in pool mode — best for the wide, uniform scatter
+  (N samples × one tool). **Requires a spawn release carrying `spawn pool`**
+  (spawn#456). Design: `docs/pool-integration-design.md`.
+
 ### Changed
 - **Task dispatch is now non-blocking, so wide fan-outs launch in parallel
   (#70).** `submit()` previously blocked until `spawn task run` returned, which

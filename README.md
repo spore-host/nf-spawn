@@ -79,6 +79,41 @@ process {
 workDir = 's3://my-bucket/nextflow-work'
 ```
 
+### Pooled execution for wide fan-out (`spawn.pool`)
+
+By default nf-spawn launches **one ephemeral instance per task**. That's ideal for
+a handful of long tasks, but a wide scatter (hundreds of short tasks — the common
+"N samples × one tool" bioinformatics pattern) is limited by *launch rate*: every
+task pays a full instance boot, so short tasks self-terminate faster than new ones
+launch and concurrency never reaches N.
+
+**Pool mode** instead provisions a fixed set of **fungible worker instances** once
+per run that pull tasks from a shared queue and reuse across jobs — per-task cost
+drops to stage + run, with no per-task boot. Opt in via `nextflow.config`:
+
+```groovy
+spawn {
+    pool {
+        enabled      = true          // default false → one instance per task
+        workers      = 100           // pool size to request (best-effort)
+        minViable    = 1             // proceed with at least this many; fewer ⇒ lower parallelism, not failure
+        instanceType = 'c7i.large'   // worker type (the pool is homogeneous)
+        spot         = false
+        idleTimeout  = '5m'          // a worker drains itself after this long idle
+        ttl          = '4h'          // per-worker TTL backstop
+    }
+}
+```
+
+- **Best-effort / never hangs:** the pool asks for `workers` but proceeds once
+  `minViable` are up — fewer workers just means lower parallelism.
+- **Scale to zero:** workers self-terminate on `idleTimeout`; the pool's queue is
+  deleted when the run ends, and spawn's reaper backstops any missed teardown.
+- **Homogeneous:** all workers share `instanceType`, so per-process
+  `ext.instanceType` is **not** honored in pool mode — use it for a run whose wide
+  scatter is uniform (turn it off, or run per-task mode, for heterogeneous sizing).
+- Requires a `spawn` release that includes the `spawn pool` command.
+
 ### Per-process `ext` options
 
 | Option | Default | Description |
