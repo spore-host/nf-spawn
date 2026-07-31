@@ -112,7 +112,16 @@ spawn {
 - **Homogeneous:** all workers share `instanceType`, so per-process
   `ext.instanceType` is **not** honored in pool mode — use it for a run whose wide
   scatter is uniform (turn it off, or run per-task mode, for heterogeneous sizing).
-- Requires a `spawn` release that includes the `spawn pool` command.
+- **Extra S3 buckets:** pool workers get read/write on the run's results/work
+  bucket by default. If your tasks stage inputs from — or write outputs to —
+  *other* buckets, grant them at pool creation with `spawn pool create --s3-read
+  <bucket>` / `--s3-write <bucket>` (repeatable), so the worker IAM profile can
+  reach them.
+- **Resilient workers:** each worker runs its pull-loop under a restart-on-error
+  supervisor — a transient failure re-execs rather than stranding an idle
+  instance, while a clean idle-drain still terminates it (scale-to-zero).
+- Requires a `spawn` release that includes the `spawn pool` command (≥ v0.96.4 for
+  the resilient-worker + extra-bucket support).
 
 ### Per-process `ext` options
 
