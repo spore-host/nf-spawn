@@ -9,11 +9,13 @@ mode fixes the dispatch-bound fan-out measured on the real N=108 run.
 
 ## Prerequisites
 
-- A **spawn release that includes `spawn pool`** (v0.96.0+), installed and on
-  `PATH`. Verify: `spawn pool --help` prints the create/submit/status/drain
-  subcommands.
-- nf-spawn ≥ the release carrying #76 (pool mode). Verify the plugin id in
-  `nextflow.config` matches.
+- **spawn ≥ v0.97.0**, installed and on `PATH`. (Earlier v0.96.x releases have
+  pool bugs that strand billable workers — workers didn't boot before v0.96.1,
+  couldn't reach the queue before v0.96.3, and lack resilient restart before
+  v0.97.0. Do not run a paid validation on < v0.97.0.) Verify: `spawn pool --help`
+  prints the create/submit/status/drain subcommands.
+- **nf-spawn ≥ v0.10.0** (the release carrying pool mode, #76). Verify the plugin
+  id in `nextflow.config` matches.
 - AWS creds for the launch account (the same account/region the N=108 run used).
   Recommended: `spore-host-dev` profile / a dedicated test account.
 - An S3 work bucket the tasks and specs can reach.
@@ -55,8 +57,11 @@ workDir = 's3://<bucket>/pool-validation-work'
 date -u +%FT%TZ
 nextflow run <pipeline> -c nextflow.config -with-trace trace.tsv -with-report report.html
 
-# While it runs, in another shell — watch the pool fill and the queue drain:
-watch -n5 'spawn pool status --run-id nf-$(nextflow log -q | tail -1)  # or read the run UUID from the nextflow log'
+# While it runs, in another shell — watch the pool fill and the queue drain.
+# The pool run-id is nf-<session UUID> (SpawnPoolConfig.poolRunId). Get the UUID
+# from the run log (the `session id`/uuid column, NOT the run name):
+RUN=nf-$(nextflow log | awk 'NR==2{print $NF}')   # or copy the session UUID from `nextflow log`
+watch -n5 "spawn pool status --run-id $RUN"
 watch -n5 'spawn list --tag spawn:role=pool-worker --state running -o json | jq length'
 ```
 

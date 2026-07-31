@@ -8,17 +8,29 @@ A [Nextflow](https://nextflow.io) executor plugin that uses [spore-host/spawn](h
 
 ## How it works
 
-Each Nextflow task is dispatched to a fresh EC2 instance via `spawn launch`. The instance runs the task script, signals completion via `spored complete`, and terminates automatically. Nextflow polls `spawn status --check-complete` to detect when each task finishes.
+Each Nextflow task is dispatched via **`spawn task run`** (the shared spawn
+workflow-adapter contract): nf-spawn builds a TaskSpec — the staging script, the
+sized instance type, and a scoped least-privilege IAM profile — and spawn sizes,
+launches, and runs it on a fresh ephemeral EC2 instance that self-terminates on
+completion. Completion is detected from the **durable `.exitcode` / `completion.json`
+that the instance writes to the S3 work dir** (not by SSH-ing the instance, which
+has already self-terminated), so a task's result survives the instance.
 
 ```
 Pipeline process → SpawnTaskHandler.submit()
-                     → spawn launch nf-<hash> --instance-type c7g.4xlarge --on-complete terminate
-                     → instance runs task script
-                     → spored complete (signals done)
-                 ← SpawnTaskHandler.checkIfRunning()
-                     → spawn status nf-<hash> --check-complete
-                     → exit 0 = done, exit 2 = still running
+                     → spawn task run --spec <taskspec.json>   (detached)
+                     → instance stages inputs, runs the task, stages outputs,
+                       writes completion.json + .exitcode to the S3 work dir,
+                       then self-terminates
+                 ← SpawnTaskHandler.checkIfCompleted()
+                     → reads <workDir>/.exitcode from S3
+                     → present = done (with its exit status); absent = still running
 ```
+
+For a **wide fan-out** (hundreds of short tasks), enable [pool
+mode](#pooled-execution-for-wide-fan-out-spawnpool): instead of one instance per
+task, a fixed set of reusable workers pull tasks from a shared queue — dispatch
+stops being launch-rate-bound and concurrency reaches the pool size you ask for.
 
 ## Requirements
 
@@ -32,7 +44,7 @@ Add to `nextflow.config`:
 
 ```groovy
 plugins {
-    id 'nf-spawn@0.9.0'
+    id 'nf-spawn@0.10.0'
 }
 ```
 
@@ -46,7 +58,7 @@ Or install locally during development:
 ```groovy
 // nextflow.config
 plugins {
-    id 'nf-spawn@0.9.0'
+    id 'nf-spawn@0.10.0'
 }
 
 process {
@@ -112,16 +124,14 @@ spawn {
 - **Homogeneous:** all workers share `instanceType`, so per-process
   `ext.instanceType` is **not** honored in pool mode — use it for a run whose wide
   scatter is uniform (turn it off, or run per-task mode, for heterogeneous sizing).
-- **Extra S3 buckets:** pool workers get read/write on the run's results/work
-  bucket by default. If your tasks stage inputs from — or write outputs to —
-  *other* buckets, grant them at pool creation with `spawn pool create --s3-read
-  <bucket>` / `--s3-write <bucket>` (repeatable), so the worker IAM profile can
+  *other* buckets, grant them at pool creation via `spawn pool create --s3-read
+  <bucket>` / `--s3-write <bucket>` (repeatable) so the worker IAM profile can
   reach them.
 - **Resilient workers:** each worker runs its pull-loop under a restart-on-error
   supervisor — a transient failure re-execs rather than stranding an idle
   instance, while a clean idle-drain still terminates it (scale-to-zero).
-- Requires a `spawn` release that includes the `spawn pool` command (≥ v0.96.4 for
-  the resilient-worker + extra-bucket support).
+- **Requires spawn ≥ v0.97.0** (the `spawn pool` command with the scoped worker
+  IAM, `--s3-read`/`--s3-write`, and resilient workers).
 
 ### Per-process `ext` options
 

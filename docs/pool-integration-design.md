@@ -1,8 +1,12 @@
 # nf-spawn pooled execution — integration design (Phase 2 of #70)
 
-**Status:** Draft / design (no code). Proposed.
-**Tracks:** nf-spawn#70 (dispatch-bound fan-out). Depends on the spawn-side pool
-(spawn#456, Phase 1: `spawn pool` CLI + `spored pool-worker`). Shares the
+**Status: IMPLEMENTED** (merged, ships in **nf-spawn v0.10.0**; requires **spawn ≥
+v0.97.0**). Retained as design rationale, written in the original proposal tense.
+The `spawn.pool { … }` config, the `SpawnPoolObserver` run-scoped lifecycle hook,
+and the pool-mode `submit()` branch all shipped as described. For current usage
+see the nf-spawn README pool section.
+**Tracks:** nf-spawn#70 (dispatch-bound fan-out). Built on the spawn-side pool
+(spawn#456, `spawn pool` CLI + `spored pool-worker`). Shares the
 run-scoped lifecycle hook with nf-spawn#69 (per-run ephemeral FSx).
 
 ---
@@ -190,6 +194,5 @@ per-task mode.
   heterogeneous pools; the #69 ephemeral-FSx use of the same hook (tracked
   separately, but the observer is structured so #69 can hang off the same
   `onFlowCreate`/`onFlowComplete`).
-- **Requires** a spawn release carrying the Phase-1 `spawn pool` CLI (spawn#456)
-  — the CHANGELOG will pin the minimum `spawn` version, as the adapter-migration
-  entry did (`spawn ≥ 0.85.0`).
+- **Requires spawn ≥ v0.97.0** (the `spawn pool` CLI with scoped worker IAM +
+  resilient workers). The nf-spawn CHANGELOG pins this minimum.

@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-31
+
 ### Added
 - **Pooled execution mode for wide fan-out — `spawn.pool` (#70).** Opt-in
   (`spawn.pool.enabled = true`), off by default. Instead of launching one
@@ -27,8 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on idle-timeout (scale to zero), and the queue is deleted at run end. Pool mode
   is **homogeneous** (one worker `instanceType`), so per-process `ext.instanceType`
   heterogeneity is not honored in pool mode — best for the wide, uniform scatter
-  (N samples × one tool). **Requires a spawn release carrying `spawn pool`**
-  (spawn#456). Design: `docs/pool-integration-design.md`.
+  (N samples × one tool). **Requires spawn ≥ v0.97.0** (the `spawn pool` command
+  with scoped worker IAM + resilient workers). Design:
+  `docs/pool-integration-design.md`.
 
 ### Changed
 - **Task dispatch is now non-blocking, so wide fan-outs launch in parallel
@@ -296,7 +299,8 @@ Baseline. Earlier history is in the
 
 ---
 
-[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/spore-host/nf-spawn/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/spore-host/nf-spawn/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/spore-host/nf-spawn/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/spore-host/nf-spawn/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/spore-host/nf-spawn/compare/v0.6.0...v0.7.0
