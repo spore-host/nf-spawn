@@ -21,6 +21,7 @@ nextflowPlugin {
     // Generates META-INF/extensions.idx so Nextflow's ExecutorFactory discovers
     // the executor (replaces the hand-maintained file from #7).
     extensionPoints = [
-        'io.nextflow.spawn.SpawnExecutor'
+        'io.nextflow.spawn.SpawnExecutor',
+        'io.nextflow.spawn.SpawnPoolObserverFactory'
     ]
 }

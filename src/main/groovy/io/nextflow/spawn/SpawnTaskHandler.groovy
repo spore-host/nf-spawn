@@ -185,6 +185,21 @@ class SpawnTaskHandler extends TaskHandler {
         specFile.toFile().deleteOnExit()
         specFile.toFile().text = JsonOutput.toJson(spec)
 
+        // POOL MODE (#70 Phase 2): when the run enabled a worker pool, don't launch
+        // an instance per task — ENQUEUE the spec to the run's shared queue and let
+        // the fungible workers (provisioned once by SpawnPoolObserver.onFlowCreate)
+        // pull it. This is what fixes the boot-per-task tax: dispatch is one
+        // `spawn pool submit` (S3 stage + SQS send), no RunInstances. Completion is
+        // detected the SAME way as per-task mode — the pooled worker writes the same
+        // .exitcode/completion.json to the S3 work dir — so checkIfRunning/
+        // checkIfCompleted below are unchanged.
+        SpawnPoolConfig poolCfg = SpawnPoolConfig.fromSession(executor.session)
+        if (poolCfg.enabled) {
+            submitToPool(poolCfg, specFile)
+            status = TaskStatus.SUBMITTED
+            return
+        }
+
         // Dispatch NON-BLOCKING (#70). At wide fan-out, blocking submit() on
         // launchProcess.waitFor() serialized every launch on Nextflow's single
         // monitor thread (~3s each → ~1 launch/3s, so a 108-task fan-out took
@@ -334,6 +349,18 @@ class SpawnTaskHandler extends TaskHandler {
     // kill() on the base now delegates to it (#9).
     @Override
     protected void killTask() {
+        // POOL MODE (#70 Phase 2): the task runs on a SHARED, fungible worker, not a
+        // per-task instance — so there is nothing task-specific to terminate here,
+        // and terminating a worker would kill whatever other task it's running.
+        // Phase 1 has no queue-level cancel, so a kill leaves any already-claimed
+        // task to finish (its own errorStrategy/TTL applies) and the pool drains on
+        // idle-timeout / at onFlowComplete. A `spawn pool cancel` to drop a still-
+        // pending task from the queue is a possible Phase-1 follow-up.
+        if (SpawnPoolConfig.fromSession(executor.session).enabled) {
+            log.info "Pool mode: not terminating a shared worker for task '${task.name}' (pool drains at run end / idle-timeout)"
+            return
+        }
+
         log.info "Terminating spawn instance '${taskId}' (${region}) for task '${task.name}'"
 
         // Use `spawn terminate`, not `spawn cancel`: cancel operates on parameter
@@ -530,6 +557,46 @@ class SpawnTaskHandler extends TaskHandler {
     @groovy.transform.PackageScope
     static List<String> buildTaskRunCommand(String specPath, String region) {
         return ['spawn', 'task', 'run', '--spec', specPath, '--region', region]
+    }
+
+    // buildPoolSubmitCommand assembles the `spawn pool submit` argv (#70 Phase 2):
+    // stage the spec to S3 and enqueue it to the run's shared queue. No instance is
+    // launched — the pool's fungible workers pull it.
+    @groovy.transform.PackageScope
+    static List<String> buildPoolSubmitCommand(String runId, String specPath) {
+        return ['spawn', 'pool', 'submit', '--run-id', runId, '--spec', specPath]
+    }
+
+    // submitToPool enqueues this task's spec to the run's pool queue via
+    // `spawn pool submit`, then deletes the temp spec file. Unlike per-task mode,
+    // this runs synchronously and briefly (S3 stage + one SQS send — no
+    // RunInstances), so it does not need the non-blocking drainer thread: the
+    // monitor thread cost is a fast enqueue, not a ~3s launch round-trip. A
+    // non-zero exit is a real dispatch failure (the task never made it onto the
+    // queue), thrown so Nextflow fails the task — matching the per-task launch
+    // failure path.
+    private void submitToPool(SpawnPoolConfig poolCfg, Path specFile) {
+        List<String> cmd = buildPoolSubmitCommand(poolCfg.runId, specFile.toString())
+        log.debug "spawn pool submit command: ${cmd.join(' ')}"
+        String output
+        int exitCode
+        try {
+            ProcessBuilder pb = new ProcessBuilder(cmd)
+            pb.redirectErrorStream(true)
+            if (region) {
+                pb.environment().put('AWS_REGION', region)
+                pb.environment().put('AWS_DEFAULT_REGION', region)
+            }
+            Process p = pb.start()
+            output = p.inputStream.text
+            exitCode = p.waitFor()
+        } finally {
+            Files.deleteIfExists(specFile)
+        }
+        if (exitCode != 0) {
+            throw new AbortOperationException("spawn pool submit failed (exit ${exitCode}) for task '${task.name}':\n${output}")
+        }
+        log.debug "enqueued task '${taskId}' to pool '${poolCfg.runId}'"
     }
 
     @groovy.transform.PackageScope
