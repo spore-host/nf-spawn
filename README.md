@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/nf-spawn-hero.png" alt="nf-spawn — a Nextflow executor plugin for spore.host" width="820">
+</p>
+
 # nf-spawn
 
 A [Nextflow](https://nextflow.io) executor plugin that uses [spore-host/spawn](https://github.com/spore-host/spawn) as the compute fabric — run each pipeline process step on its own ephemeral EC2 instance, purpose-sized and auto-terminated when the task completes.
