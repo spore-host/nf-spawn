@@ -27,6 +27,17 @@ class SpawnTaskHandler extends TaskHandler {
     private String workDirUri
     private String region
 
+    // Non-blocking dispatch state (#70). submit() now starts `spawn task run` and
+    // returns immediately; a daemon thread drains the subprocess output (so its
+    // OS pipe buffer can't fill and deadlock) and reaps the exit code into these
+    // fields. checkIfRunning() consumes the result on the next poll. Volatile: the
+    // drainer thread writes, the monitor thread reads. launchDone is written LAST
+    // (after launchExit/launchOutput), so a reader that observes launchDone==true
+    // sees the other two fully written.
+    private volatile boolean launchDone
+    private volatile int launchExit
+    private volatile String launchOutput = ''
+
     SpawnTaskHandler(TaskRun task, SpawnExecutor executor) {
         super(task)
         this.executor = executor
@@ -167,36 +178,51 @@ class SpawnTaskHandler extends TaskHandler {
         Map spec = buildTaskSpec(taskId, stagingScript, instanceType, ttl, spot, workDirUri,
                                  ami, az, attachVolumes, fsx, efs)
 
-        // Write the TaskSpec JSON to a temp file; delete it once spawn has read it
-        // (in a finally) rather than leaving it in /tmp (#59).
+        // Write the TaskSpec JSON to a temp file; deleted by the drainer thread
+        // once `spawn task run` has exited (having read it), rather than leaving it
+        // in /tmp (#59). deleteOnExit is a JVM-shutdown backstop.
         Path specFile = Files.createTempFile("nf-spawn-${taskId}-", ".json")
-        specFile.toFile().deleteOnExit() // backstop if the finally is bypassed
-        String output
-        int exitCode
-        try {
-            specFile.toFile().text = JsonOutput.toJson(spec)
+        specFile.toFile().deleteOnExit()
+        specFile.toFile().text = JsonOutput.toJson(spec)
 
-            // Launch DETACHED (no --wait): spawn sizes, launches, and the instance
-            // writes its own completion record. Nextflow's TaskPollingMonitor drives
-            // completion via checkIfCompleted() polling `spawn task status`, so a
-            // blocking --wait would stall the monitor thread (#31).
-            List<String> cmd = buildTaskRunCommand(specFile.toString(), region)
-            log.debug "spawn task run command: ${cmd.join(' ')}"
+        // Dispatch NON-BLOCKING (#70). At wide fan-out, blocking submit() on
+        // launchProcess.waitFor() serialized every launch on Nextflow's single
+        // monitor thread (~3s each → ~1 launch/3s, so a 108-task fan-out took
+        // ~5m44s just to dispatch and never exceeded ~60 concurrent). Instead we
+        // start `spawn task run` and return immediately; the launch round-trips
+        // then overlap. A daemon thread drains the merged stdout/stderr — REQUIRED
+        // so the subprocess's OS pipe buffer can't fill and wedge it — reaps the
+        // exit code, and deletes the spec file only AFTER the process exits (spawn
+        // has finished reading it by then). checkIfRunning() consumes the result on
+        // the next poll and surfaces a launch failure there (see #31 for why
+        // completion is polled, not waited: --wait would re-stall the monitor).
+        List<String> cmd = buildTaskRunCommand(specFile.toString(), region)
+        log.debug "spawn task run command: ${cmd.join(' ')}"
 
-            ProcessBuilder pb = new ProcessBuilder(cmd)
-            pb.redirectErrorStream(true)
-            launchProcess = pb.start()
-            output = launchProcess.inputStream.text
-            exitCode = launchProcess.waitFor()
-        } finally {
-            Files.deleteIfExists(specFile)
-        }
+        ProcessBuilder pb = new ProcessBuilder(cmd)
+        pb.redirectErrorStream(true)
+        launchProcess = pb.start()
 
-        if (exitCode != 0) {
-            throw new AbortOperationException("spawn task run failed (exit $exitCode) for task '${task.name}':\n${output}")
-        }
+        Process p = launchProcess
+        Thread drainer = new Thread({ ->
+            String out = ''
+            try {
+                out = p.inputStream.text   // drains the pipe; blocks until EOF
+                int rc = p.waitFor()
+                launchOutput = out
+                launchExit = rc
+            } catch (Exception e) {
+                launchOutput = out
+                launchExit = -1
+                log.debug "Error draining spawn task run for '${taskId}': ${e.message}"
+            } finally {
+                Files.deleteIfExists(specFile)
+                launchDone = true          // written LAST; publishes the fields above
+            }
+        } as Runnable, "nf-spawn-launch-${taskId}")
+        drainer.daemon = true
+        drainer.start()
 
-        log.debug "spawn task run output for '${taskId}':\n${output}"
         // Leave status SUBMITTED. Nextflow's TaskPollingMonitor drives the
         // SUBMITTED→RUNNING transition via checkIfRunning(); pre-setting RUNNING
         // here bypasses notifyTaskStart(), so the task is never counted as
@@ -213,6 +239,22 @@ class SpawnTaskHandler extends TaskHandler {
     boolean checkIfRunning() {
         if (status != TaskStatus.SUBMITTED) {
             return status == TaskStatus.RUNNING
+        }
+        // Non-blocking dispatch (#70): submit() returned before `spawn task run`
+        // finished. Wait for it to complete before probing for RUNNING — until
+        // then there's no instance to be running, and a launch failure isn't known
+        // yet. The monitor re-polls us each tick, so returning false is "still
+        // dispatching", not an error.
+        if (!launchDone) {
+            return false
+        }
+        // The launch has finished. A non-zero exit means `spawn task run` failed to
+        // dispatch (no instance created), so throw exactly as the old blocking
+        // submit() did — the monitor's checkTaskStatus wraps this in try/catch and
+        // calls kill() (a no-op terminate here — nothing launched) + handleException.
+        // Surfacing it here rather than in submit() is what makes dispatch overlap.
+        if (launchExit != 0) {
+            throw new AbortOperationException("spawn task run failed (exit ${launchExit}) for task '${task.name}':\n${launchOutput}")
         }
         // Fast-finishing tasks may produce the completion record before we ever
         // observe RUNNING. If the durable signal is already present, promote to

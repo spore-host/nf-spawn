@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Task dispatch is now non-blocking, so wide fan-outs launch in parallel
+  (#70).** `submit()` previously blocked until `spawn task run` returned, which
+  serialized every launch on Nextflow's single task-monitor thread — a 108-task
+  fan-out took ~5m44s just to dispatch and never exceeded ~60 concurrent
+  instances. `submit()` now starts `spawn task run` and returns immediately; a
+  daemon thread drains its output (so its pipe can't fill and wedge) and reaps
+  the exit code, and `checkIfRunning()` picks up the result on the next poll.
+  Launch round-trips now overlap. A launch *failure* is surfaced from
+  `checkIfRunning()` (which fails the task exactly as before) rather than from
+  `submit()`. This is the first, no-new-infrastructure step toward #70; the
+  deeper per-task instance-boot cost is addressed by the pooled-worker design
+  (spawn `docs/pooled-task-execution-design.md`).
+
 ## [0.9.0] - 2026-07-19
 
 ### Changed
