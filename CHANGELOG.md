@@ -21,7 +21,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nextflow-plugin` toolchain, already a release behind. A new
   `SpawnCiHygieneTest` fails the build if a pin is reverted or an entry dropped.
 
+### Changed
+- **Actions bumped, and every pin's version comment now states the truth (#83).**
+  `actions/checkout` → v7.0.1, `actions/setup-java` → v5.6.0,
+  `softprops/action-gh-release` → v3.0.2. The bumps arrived from Dependabot
+  labelled `# v6` on all five `checkout` refs — but the SHA it moved to
+  (`3d3c42e`) is **v7.0.1**, so a three-major jump read as a routine same-line
+  bump; `gradle/actions/setup-gradle` had likewise carried a bare `# v4` while
+  pinning v4.4.3. Comments now name exact versions. Nothing in the majors affects
+  this repo: `action-gh-release@v3` requires the Node 24 runtime, which the orion
+  runner (2.336.0) provides and `checkout@v6.0.3` was already using, and
+  `checkout@v7`'s one behavior change only blocks fork checkouts under
+  `pull_request_target`/`workflow_run`, neither of which appears here.
+
 ### Fixed
+- **A pin's version comment can no longer silently misstate what CI runs (#83).**
+  `SpawnCiHygieneTest` required only that *some* `# vN` comment be present, so the
+  mislabelled `checkout` bump above passed it. It now requires an exact `vX.Y.Z`,
+  and a new `scripts/verify-pins.sh` — wired into CI, so it gates PRs — resolves
+  each SHA against the tag its comment claims and fails if they disagree. The
+  network half lives in the script to keep the Spock suite hermetic. Both accept
+  annotated-tag pins (the tag object *or* the commit it points at); an earlier
+  draft compared against only one form and called a correct pin mislabelled.
 - **`./gradlew test` no longer reports success without running the tests when only
   CI config changed (#80).** Gradle's up-to-date check considered just the Groovy
   sources, so a commit touching only `.github/` or `build.gradle` would skip
