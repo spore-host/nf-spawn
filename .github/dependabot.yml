@@ -1,0 +1,83 @@
+# Dependabot configuration for nf-spawn.
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Why this file exists: this repo's workflows were ALREADY fully SHA-pinned, which
+# closes the mutable-tag hole but opens a staleness one — a pinned SHA never moves,
+# including past a security fix, and unlike a `@v6` tag nothing updates it. Pinning
+# is only safe when something bumps the pins, and until now nothing did. The two
+# are one control, not two. (#80)
+#
+# The staleness was already real, not hypothetical: five `actions/checkout` refs
+# sat on df4cb1c (2026-06-02) while `@v6` had moved to d23441a (2026-07-16). The
+# security workflow runs gitleaks, Trivy and Semgrep, and none of them look at
+# action pins — so nothing in this repo would ever have said so.
+#
+# Authority here is repo-write only: release.yml holds `contents: write` via
+# softprops/action-gh-release. No OIDC, no publish credentials, no AWS access, and
+# the composition test runs against a stub (no instances, no cost). This is about
+# keeping pins current, not about an exposed credential.
+
+version: 2
+updates:
+  # GitHub Actions. Dependabot understands SHA pins: it rewrites both the SHA and
+  # the trailing `# vX.Y.Z` comment, so pins stay readable and reviewable and
+  # SpawnCiHygieneTest keeps passing across a bump.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    # Don't propose a release the day it ships; let it sit a week first. A fresh
+    # action tag is exactly when a compromised or broken one is still unnoticed.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps(actions)"
+      include: "scope"
+    # No `reviewers:` key on purpose — it's deprecated and inert. Every one of the
+    # umbrella repo's Dependabot PRs asks for a reviewer and none has ever had a
+    # review request. Use CODEOWNERS if you want one.
+    groups:
+      # One PR for all of them. The pattern MUST stay "*" rather than "actions/*":
+      # this repo uses gradle/actions, aquasecurity/trivy-action and
+      # softprops/action-gh-release as well, so "actions/*" would silently exclude
+      # most of the refs in use — including the two Trivy pins in the security
+      # workflow. SpawnCiHygieneTest checks the patterns really cover every action.
+      github-actions:
+        patterns:
+          - "*"
+
+  # Gradle. There is no `dependencies { }` block — the compile/test deps come from
+  # the io.nextflow.nextflow-plugin toolchain — so the two plugin versions in
+  # build.gradle and settings.gradle are the whole dependency surface, and nothing
+  # was watching either. Both resolve as Plugin Portal marker artifacts, which is
+  # what lets the `gradle` ecosystem see them.
+  #
+  # nextflow-plugin in particular is the toolchain that resolves the Nextflow API
+  # and generates the plugin manifest, so it is the dependency most likely to need
+  # a coordinated bump (see #3 / #7 / #9). Expect its PRs to need a real look
+  # rather than a rubber stamp: a bump can move the targeted Nextflow API.
+  - package-ecosystem: "gradle"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    groups:
+      gradle-dependencies:
+        patterns:
+          - "*"

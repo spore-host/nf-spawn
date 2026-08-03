@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Dependabot now bumps the SHA-pinned actions and the Gradle plugins (#80).**
+  CI was already fully SHA-pinned, but nothing ever moved those pins — and a
+  pinned SHA never moves on its own, including past a security fix. The staleness
+  was real: five `actions/checkout` refs sat on `df4cb1c` (2026-06-02) while `@v6`
+  had moved to `d23441a` (2026-07-16), and gitleaks/Trivy/Semgrep don't look at
+  action pins, so nothing said so. `.github/dependabot.yml` adds `github-actions`
+  (group pattern `*`, so the `gradle/`, `aquasecurity/` and `softprops/` refs are
+  covered too) and `gradle`, which had nothing watching the two plugin versions
+  that are this project's whole dependency surface — including the
+  `nextflow-plugin` toolchain, already a release behind. A new
+  `SpawnCiHygieneTest` fails the build if a pin is reverted or an entry dropped.
+
+### Fixed
+- **`./gradlew test` no longer reports success without running the tests when only
+  CI config changed (#80).** Gradle's up-to-date check considered just the Groovy
+  sources, so a commit touching only `.github/` or `build.gradle` would skip
+  `:test` against a warm cache — which CI restores. Those files are now declared
+  test inputs. Found while mutation-testing the new hygiene check: the suite
+  reported green against deliberately broken config, and a gate that fails open is
+  worse than no gate.
+
 ### Documentation
 - Added the spore.host hero image to the top of the README.
 

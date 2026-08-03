@@ -25,3 +25,16 @@ nextflowPlugin {
         'io.nextflow.spawn.SpawnPoolObserverFactory'
     ]
 }
+
+// SpawnCiHygieneTest reads CI config, so declare those files as test inputs (#80).
+//
+// Without this, Gradle's up-to-date check only considers Groovy sources: a commit
+// that reverts an action pin or deletes dependabot.yml touches neither, so with a
+// warm cache (CI restores one via gradle/actions/setup-gradle) `:test` is SKIPPED
+// and the hygiene check silently never runs. Found by mutating the config and
+// watching the suite report success — a gate that fails open is worse than none.
+tasks.named('test') {
+    inputs.files(fileTree('.github')).withPropertyName('ciConfig').withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file('build.gradle').withPropertyName('buildScript').withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file('settings.gradle').withPropertyName('settingsScript').withPathSensitivity(PathSensitivity.RELATIVE)
+}
