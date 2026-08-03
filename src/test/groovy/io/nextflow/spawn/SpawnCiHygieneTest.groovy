@@ -83,6 +83,35 @@ class SpawnCiHygieneTest extends Specification {
                 '\nUse: uses: owner/action@<40-hex-sha> # vX.Y.Z'
     }
 
+    def 'every version comment names an exact patch version, not a bare major'() {
+        // The comment is the only human-readable part of a pin, and a bare `# v6`
+        // is not just vague — it can be actively false, which is worse than absent.
+        // Dependabot bumped checkout to 3d3c42e (which is v7.0.1) while leaving the
+        // comment reading `# v6` on all five refs. The pin was correct; the label
+        // said it was a major version behind what it actually ran, and the previous
+        // spec passed because it only required SOME `# vN` to be present. A stale
+        // `# v4` on setup-gradle (really v4.4.3) had sat on main the same way.
+        //
+        // Requiring X.Y.Z is the strongest version of this claim checkable offline:
+        // a bare major can silently keep meaning something new as the pin moves,
+        // whereas an exact version either matches the SHA or is a visible lie, and
+        // reviewers can resolve it. Verifying comment-vs-tag needs the network, so
+        // it stays out of the unit suite — see scripts/verify-pins.sh.
+        given:
+        def exact = Pattern.compile(/^[^@\s]+@[0-9a-f]{40}\s+#\s*v\d+\.\d+\.\d+\s*$/)
+        def refs = usesRefs()
+
+        expect: 'anti-vacuous — if the parser stops matching, this would pass forever'
+        !refs.isEmpty()
+
+        and:
+        def vague = refs.findAll { !exact.matcher(it[2] as String).matches() }
+        assert vague.isEmpty(), 'these pins do not name an exact vX.Y.Z, so the comment ' +
+                'cannot be checked against the SHA and may silently misstate what CI runs:\n' +
+                vague.collect { "    ${it[0]}:${it[1]}  ${it[2]}" }.join('\n') +
+                '\nResolve the SHA to its tag and write that: # vX.Y.Z'
+    }
+
     def 'Dependabot has a github-actions entry whose group patterns cover every action'() {
         // The other half of pinning. A SHA never moves, including past a security
         // fix, so pinning without Dependabot trades a mutable-tag hole for a

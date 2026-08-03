@@ -21,19 +21,19 @@ jobs:
     # GitHub-hosted, change this line to: runs-on: ubuntu-latest
     runs-on: [self-hosted, orion]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # JDK 21: the io.nextflow.nextflow-plugin toolchain builds with a JDK 21
       # toolchain (sources still target Java 17). Provide 21 so Gradle uses it
       # rather than downloading one.
       - name: Setup JDK 21
-        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
         with:
           distribution: temurin
           java-version: '21'
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947 # v4
+        uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947 # v4.4.3
 
       - name: Build
         run: ./gradlew assemble --no-daemon
@@ -43,3 +43,14 @@ jobs:
       # main safety net and were previously never executed in CI.
       - name: Test
         run: ./gradlew test --no-daemon
+
+      # The half of pin hygiene that needs the network, so it can't live in the
+      # (hermetic) Spock suite: does each pin's `# vX.Y.Z` comment actually name
+      # the tag its SHA carries? A wrong label is worse than none — it makes a
+      # major-version jump read as a routine same-line bump, which is exactly how
+      # a checkout v6 -> v7.0.1 bump nearly landed labelled `# v6`.
+      #
+      # Read-only (git ls-remote), no auth. Runs on PRs, so a Dependabot bump that
+      # mislabels a pin is caught before merge rather than after.
+      - name: Verify pin comments match their SHAs
+        run: ./scripts/verify-pins.sh
