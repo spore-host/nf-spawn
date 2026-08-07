@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- CI moved off the self-hosted orion runner fleet onto `ubuntu-latest`. The
+  fleet (colima/Docker on orion.local) is being decommissioned org-wide; no
+  behavior change to the tool.
+
 ### Security
 - **Dependabot now bumps the SHA-pinned actions and the Gradle plugins (#80).**
   CI was already fully SHA-pinned, but nothing ever moved those pins — and a
