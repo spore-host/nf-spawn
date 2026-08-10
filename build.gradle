@@ -4,7 +4,7 @@ plugins {
     // provides pf4j/slf4j/test deps, and generates the plugin manifest +
     // META-INF/extensions.idx — so the build can't drift from the Nextflow API
     // it targets (the recurring cause of #3 / #7 / #9).
-    id 'io.nextflow.nextflow-plugin' version '1.0.0-beta.14'
+    id 'io.nextflow.nextflow-plugin' version '1.0.0-beta.15'
 }
 
 group = 'io.nextflow'
