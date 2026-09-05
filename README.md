@@ -44,15 +44,44 @@ stops being launch-rate-bound and concurrency reaches the pool size you ask for.
 
 ## Installation
 
-Add to `nextflow.config`:
+> **nf-spawn is not (yet) in the [Nextflow plugin registry](https://github.com/nextflow-io/plugins).**
+> That means the common `plugins { id 'nf-spawn@X.Y.Z' }` form Nextflow can
+> resolve automatically does **not** work for this plugin — Nextflow would try
+> to fetch it from the registry index and fail, since nf-spawn isn't listed
+> there. Install the release zip manually instead (below). If/when nf-spawn is
+> published to the registry, this section will change to the one-line form.
+
+**1. Download** the release zip for the version you want from the
+[Releases page](https://github.com/spore-host/nf-spawn/releases) (or `curl`
+it directly — replace `X.Y.Z` with a real release, e.g. `0.10.0`):
+
+```bash
+curl -sSL -o nf-spawn-X.Y.Z.zip \
+    https://github.com/spore-host/nf-spawn/releases/download/vX.Y.Z/nf-spawn-X.Y.Z.zip
+```
+
+**2. Unpack it** into `~/.nextflow/plugins/`:
+
+```bash
+mkdir -p ~/.nextflow/plugins
+unzip -o nf-spawn-X.Y.Z.zip -d ~/.nextflow/plugins/nf-spawn-X.Y.Z
+```
+
+**3. Reference it** in `nextflow.config` using the same version:
 
 ```groovy
 plugins {
-    id 'nf-spawn@0.10.0'
+    id 'nf-spawn@X.Y.Z'
 }
 ```
 
-Or install locally during development:
+Nextflow resolves a plugin already present under `~/.nextflow/plugins/` before
+it ever consults the registry, so this works offline and needs no registry
+listing. The version in `nextflow.config` must match the plugin manifest's
+`Plugin-Version` exactly (as of #91, the release workflow enforces that every
+tagged release's zip reports the version its tag says).
+
+**Building from source instead:**
 ```bash
 ./gradlew installPlugin   # builds and unpacks into ~/.nextflow/plugins/nf-spawn-<version>/
 ```
@@ -62,7 +91,7 @@ Or install locally during development:
 ```groovy
 // nextflow.config
 plugins {
-    id 'nf-spawn@0.10.0'
+    id 'nf-spawn@X.Y.Z'   // match the version you installed above
 }
 
 process {

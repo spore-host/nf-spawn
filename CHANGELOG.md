@@ -19,6 +19,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (matching the passwordless-sudo already relied on for `ensureDocker`'s own `dnf
   install`/`systemctl` calls, and spawn's own task wrapper's docker invocations),
   so containerized tasks work on a stock AMI with no config changes.
+- **The release workflow now verifies the built plugin zip's manifest, not
+  just `build.gradle`'s source line (#91).** The v0.10.0 release zip's
+  `MANIFEST.MF` declared `Plugin-Version: 0.8.0` — two releases behind the
+  `v0.10.0` tag it shipped under — because the old "tag matches version"
+  check only grepped `build.gradle`'s `version = '...'` line, which was
+  already correct; it never looked at what the build actually produced. A new
+  `scripts/check-release-version.sh` builds the real zip, unzips it, and
+  compares the *manifest's* `Plugin-Version` (and `Plugin-Id`) against the
+  tag, failing the release if either is wrong or if `CHANGELOG.md` still says
+  `[Unreleased]` for that version.
+
+### Documentation
+- **README's Installation section no longer leads with instructions that
+  can't work (#90).** `plugins { id 'nf-spawn@X.Y.Z' }` resolves against the
+  Nextflow plugin registry, and nf-spawn is not published there — a user who
+  copied that snippet onto a clean machine got a resolution failure. The
+  primary, documented path is now downloading the release zip and unpacking
+  it into `~/.nextflow/plugins/`, with the registry form called out as
+  not-yet-available.
 
 ### Changed
 - CI moved off the self-hosted orion runner fleet onto `ubuntu-latest`. The
