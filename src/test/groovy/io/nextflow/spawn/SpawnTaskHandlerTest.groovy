@@ -397,6 +397,23 @@ class SpawnTaskHandlerTest extends Specification {
         !line.startsWith('bash .command.sh')
     }
 
+    // The docker invocation is sudo-prefixed (#92): the task user on a stock AMI
+    // is not in the `docker` group (ensureDocker never adds it, and a mid-session
+    // `usermod` wouldn't take effect anyway), so without sudo the container run
+    // fails "permission denied" on /var/run/docker.sock. sudo matches spawn's own
+    // instance provisioning (passwordless sudo for the login user) and spawn's
+    // own task wrapper, which runs its docker calls the same way.
+    def 'run line runs docker via sudo, so the task user need not be in the docker group (#92)'() {
+        when:
+        def line = SpawnTaskHandler.buildRunLine('biocontainers/fastqc:0.12.1--hdfd78af_0')
+
+        then: 'the docker invocation is sudo-prefixed'
+        line.startsWith('sudo docker run --rm')
+
+        and: 'bare-OS (no container) tasks are unaffected — no sudo needed there'
+        !SpawnTaskHandler.buildRunLine(null).contains('sudo')
+    }
+
     def 'staging script honors the container directive end-to-end (#30)'() {
         when:
         def script = SpawnTaskHandler.buildStagingScript(

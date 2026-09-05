@@ -1148,6 +1148,21 @@ class SpawnTaskHandler extends TaskHandler {
     // task's exit code so ${TASK_RC} stays accurate. --rm cleans up the
     // container; the image is pulled on demand (Docker is preinstalled on the AMI).
     //
+    // `docker run` is run via `sudo` (#92). buildSetupScript's `ensureDocker`
+    // installs Docker and starts the daemon, but never adds the instance user to
+    // the `docker` group — and even if it did, `usermod -aG docker` doesn't take
+    // effect in the CURRENT shell/session (needs a new login shell or `newgrp`),
+    // which this staging script is: setup and the task run in one continuous
+    // `bash -lc` invocation. So every `docker run` here failed "permission denied"
+    // on /var/run/docker.sock, since the socket is root/docker-group-only and the
+    // task user is in neither. `sudo` sidesteps the group-membership problem
+    // entirely and matches the instance's own provisioning: spawn's bootstrap
+    // grants the login user passwordless sudo (`NOPASSWD:ALL`, the same one this
+    // very script already relies on for `sudo dnf install` / `sudo systemctl` /
+    // `sudo mkdir` above) — and spawn's OWN task wrapper (pkg/taskproto/wrapper.go)
+    // runs its docker calls the identical way ("AL2023's default user has
+    // passwordless sudo"). No behavior change for a bare-OS task (no container).
+    //
     // runOptions is spliced in verbatim (the resolved `docker.runOptions` +
     // per-process `containerOptions`). Dropping it meant a pipeline's
     // `docker { runOptions = '--user root' }` was ignored, so the container ran
@@ -1182,7 +1197,7 @@ class SpawnTaskHandler extends TaskHandler {
         }
         String image = shellQuote(container.trim())
         String opts = runOptions?.trim() ? runOptions.trim() + ' ' : ''
-        return 'docker run --rm -v "${LOCAL_DIR}":"${LOCAL_DIR}" -w "${LOCAL_DIR}" ' +
+        return 'sudo docker run --rm -v "${LOCAL_DIR}":"${LOCAL_DIR}" -w "${LOCAL_DIR}" ' +
             opts + image + ' bash .command.sh 1>.command.out 2>.command.err\n'
     }
 

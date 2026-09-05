@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Every containerized process failed exit 126 with "permission denied" on the Docker socket (#92).**
+  nf-spawn runs its own `docker run` on the task instance (via the `ext.ensureDocker`
+  Docker install), but never ran it with `sudo` — and the task user on a stock AMI
+  is not a member of the `docker` group, so it couldn't reach
+  `/var/run/docker.sock`. No containerized pipeline ran out of the box; the
+  documented workaround was a manual `ext.setup = 'sudo chmod 666
+  /var/run/docker.sock'` hook. The `docker run` invocation is now `sudo`-prefixed
+  (matching the passwordless-sudo already relied on for `ensureDocker`'s own `dnf
+  install`/`systemctl` calls, and spawn's own task wrapper's docker invocations),
+  so containerized tasks work on a stock AMI with no config changes.
+
 ### Changed
 - CI moved off the self-hosted orion runner fleet onto `ubuntu-latest`. The
   fleet (colima/Docker on orion.local) is being decommissioned org-wide; no
