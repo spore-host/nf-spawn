@@ -27,21 +27,17 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
-      # Sanity-check the tag matches build.gradle's version, so the artifact and
-      # the release tag never drift.
-      - name: Verify version matches tag
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
-          ver=$(grep -E "^version" build.gradle | sed -E "s/.*'(.*)'.*/\1/")
-          echo "tag=$tag build.gradle version=$ver"
-          if [ "$tag" != "$ver" ]; then
-            echo "::error::tag v$tag does not match build.gradle version $ver"
-            exit 1
-          fi
-
-      - name: Build plugin zip
-        run: ./gradlew assemble --no-daemon
+      # Hard-fail the tag if the built zip's manifest doesn't actually report
+      # this tag's version (#91). The old check here only compared the tag to
+      # build.gradle's SOURCE `version = '...'` line — which is exactly what
+      # was correct when v0.10.0 shipped a zip whose MANIFEST.MF still said
+      # 0.8.0, because a source-line grep can't see what the build actually
+      # produced. This script builds the real zip and reads Plugin-Version out
+      # of it. It also fails while CHANGELOG.md still says [Unreleased] for
+      # this tag. This is the only build step now — it leaves the artifact in
+      # build/distributions for the publish step below.
+      - name: Release version guard (verifies the built zip's manifest, not just the source line)
+        run: scripts/check-release-version.sh "${GITHUB_REF_NAME}"
 
       - name: Publish release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
