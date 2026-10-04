@@ -101,6 +101,7 @@ process {
     ext.instanceType = 't3.medium'
     ext.region       = 'us-east-1'
     ext.ttl          = '2h'
+    ext.costLimit    = '0.50'   // USD; a second ceiling, independent of ttl
 
     // Per-process overrides
     withName: 'KRAKEN2' {
@@ -174,6 +175,7 @@ spawn {
 | `ext.region` | `us-east-1` | AWS region |
 | `ext.az` | _(spawn picks)_ | Pin the task to an availability zone (`--az`). Set this to the AZ where a snapshot's [Fast Snapshot Restore](#delivering-reference-data) is enabled — FSR is per-AZ, so a volume restored in another AZ lazy-loads from S3 instead |
 | `ext.ttl` | `2h` | Max instance lifetime (safety backstop) |
+| `ext.costLimit` | _(none)_ | Per-task spend cap in USD, e.g. `'0.50'`. Enforced by `spored` **independently** of the TTL — first limit to fire wins — so it catches a task that *hangs* rather than fails, which produces no exit status for Nextflow to act on and otherwise bills to the full TTL |
 | `ext.spot` | `false` | Launch as a Spot instance |
 | `ext.ami` | _(auto)_ | Explicit AMI ID; omit to let spawn auto-detect a stock AMI |
 | `ext.volumeSize` | _(AMI min)_ | Extra root EBS size in GiB beyond the AMI minimum |

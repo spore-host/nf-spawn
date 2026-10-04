@@ -11,7 +11,7 @@ class SpawnTaskHandlerTest extends Specification {
     def 'buildTaskSpec pins the exact instance type and declares the work bucket (spawn#386/#413)'() {
         when:
         def spec = SpawnTaskHandler.buildTaskSpec(
-            'nf-abc123', '#!/bin/bash\necho hi\n', 'c7i.4xlarge', '2h', false,
+            'nf-abc123', '#!/bin/bash\necho hi\n', 'c7i.4xlarge', '2h', '', false,
             's3://my-bucket/work/ab/cdef', '', '', [], [:], [:])
 
         then: 'the staging script is the command, wrapped in bash -lc'
@@ -36,7 +36,7 @@ class SpawnTaskHandlerTest extends Specification {
     def 'buildTaskSpec maps ext.* launch directives onto the placement block (spawn#386)'() {
         when:
         def spec = SpawnTaskHandler.buildTaskSpec(
-            'nf-abc123', 's', 't3.medium', '2h', true, 's3://b/w',
+            'nf-abc123', 's', 't3.medium', '2h', '', true, 's3://b/w',
             'ami-0abc', 'us-east-1a', ['snap-0aaa:/ref:ro', 'snap-0bbb:/data:rw'],
             [id: 'fs-fsx', mount: '/fsx'], [id: 'fs-efs', mount: '/efs'])
 
@@ -889,5 +889,43 @@ class SpawnTaskHandlerTest extends Specification {
         then: 'the symlink substitution is announced to stderr'
         script.contains("input 'kraken2'")
         script.contains('basename match')
+    }
+
+    def 'buildLifecycle emits cost_limit only when ext.costLimit is set and positive (nf-spawn#100)'() {
+        expect: 'a positive cap is a second, independent ceiling'
+        SpawnTaskHandler.buildLifecycle('2h', '0.05') ==
+            [ttl: '2h', on_complete: 'terminate', cost_limit: 0.05d]
+
+        and: 'unset leaves spawn\'s own default behaviour — absent, not null'
+        SpawnTaskHandler.buildLifecycle('2h', '')   == [ttl: '2h', on_complete: 'terminate']
+        SpawnTaskHandler.buildLifecycle('2h', null) == [ttl: '2h', on_complete: 'terminate']
+
+        and: 'zero or negative is treated as unset — a zero cap would mean terminate immediately'
+        SpawnTaskHandler.buildLifecycle('2h', '0')  == [ttl: '2h', on_complete: 'terminate']
+        SpawnTaskHandler.buildLifecycle('2h', '-1') == [ttl: '2h', on_complete: 'terminate']
+
+        and: 'surrounding whitespace survives a config file'
+        SpawnTaskHandler.buildLifecycle('2h', ' 1.5 ') ==
+            [ttl: '2h', on_complete: 'terminate', cost_limit: 1.5d]
+    }
+
+    def 'buildLifecycle degrades a non-numeric costLimit rather than aborting the run (nf-spawn#100)'() {
+        when: 'a typo in nextflow.config'
+        def lc = SpawnTaskHandler.buildLifecycle('2h', 'five cents')
+
+        then: 'the task is bounded by TTL only — the previous behaviour — not killed'
+        lc == [ttl: '2h', on_complete: 'terminate']
+    }
+
+    def 'buildTaskSpec threads ext.costLimit into lifecycle (nf-spawn#100)'() {
+        when:
+        def spec = SpawnTaskHandler.buildTaskSpec(
+            'nf-abc123', 's', 't3.medium', '2h', '0.25', false, 's3://b/w',
+            '', '', [], [:], [:])
+
+        then:
+        spec.lifecycle.cost_limit == 0.25d
+        spec.lifecycle.ttl == '2h'
+        spec.lifecycle.on_complete == 'terminate'
     }
 }

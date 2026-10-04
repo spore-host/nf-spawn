@@ -58,6 +58,14 @@ class SpawnTaskHandler extends TaskHandler {
         this.region         = (ext.region       ?: 'us-east-1') as String
         String region       = this.region
         String ttl          = (ext.ttl          ?: '2h') as String
+        // ext.costLimit: a per-task spend cap in USD (nf-spawn#100). TTL bounds a
+        // task in TIME, not money, and spored enforces the two INDEPENDENTLY —
+        // first limit to fire wins — so this is a genuine second belt. Without it
+        // the only ceiling is the TTL, so a fan-out of N tasks has a worst case of
+        // N x ttl x the instance rate, and the failure that actually costs money is
+        // a task that HANGS rather than fails: it produces no exit status for
+        // Nextflow to retry or abort on, so it bills until the TTL expires.
+        String costLimit    = (ext.costLimit    ?: '') as String
         boolean spot        = ext.spot ? true : false
         String ami          = (ext.ami ?: '') as String
         int volumeSize      = (ext.volumeSize ?: 0) as int
@@ -175,7 +183,7 @@ class SpawnTaskHandler extends TaskHandler {
         // scoped policy; it hands spawn a TaskSpec (spawn#386 adapter migration).
         String stagingScript = buildStagingScript(workDirUri, region, task.script, container, task.getInputFilesMap(), runOptions, setup, mountPaths, false)
 
-        Map spec = buildTaskSpec(taskId, stagingScript, instanceType, ttl, spot, workDirUri,
+        Map spec = buildTaskSpec(taskId, stagingScript, instanceType, ttl, costLimit, spot, workDirUri,
                                  ami, az, attachVolumes, fsx, efs)
 
         // Write the TaskSpec JSON to a temp file; deleted by the drainer thread
@@ -488,7 +496,7 @@ class SpawnTaskHandler extends TaskHandler {
     // there are no inputs/outputs manifests).
     @groovy.transform.PackageScope
     static Map buildTaskSpec(String taskId, String stagingScript, String instanceType,
-                             String ttl, boolean spot, String workDirUri,
+                             String ttl, String costLimit, boolean spot, String workDirUri,
                              String ami, String az, List<String> attachVolumes,
                              Map fsx, Map efs) {
         Map<String, Object> resources = [:]
@@ -521,10 +529,38 @@ class SpawnTaskHandler extends TaskHandler {
             task_id  : taskId,
             command  : ['/bin/bash', '-lc', stagingScript],
             resources: resources,
-            lifecycle: [ttl: ttl, on_complete: 'terminate'],
+            lifecycle: buildLifecycle(ttl, costLimit),
         ]
         if (placement) spec.placement = placement
         return spec
+    }
+
+    // buildLifecycle emits lifecycle.cost_limit only when ext.costLimit is set and
+    // positive (nf-spawn#100), so omitting it leaves spawn's own default behaviour
+    // unchanged and the spec minimal.
+    //
+    // costLimit arrives as a String because every ext directive does. A
+    // non-numeric value degrades to 'bounded by TTL only' with a warning rather
+    // than aborting the run: a typo in a config file should not kill a pipeline
+    // that is otherwise fine. Non-positive is treated as unset too — a zero cap
+    // would mean 'terminate immediately', which is never what someone typing 0
+    // intends.
+    static Map buildLifecycle(String ttl, String costLimit) {
+        Map<String, Object> lifecycle = [ttl: ttl, on_complete: 'terminate']
+        if (!costLimit) {
+            return lifecycle
+        }
+        try {
+            double v = Double.parseDouble(costLimit.trim())
+            if (v > 0) {
+                lifecycle.cost_limit = v
+            }
+        }
+        catch (NumberFormatException ignored) {
+            log.warn("nf-spawn: ignoring non-numeric ext.costLimit '${costLimit}'; " +
+                     'the task will be bounded by TTL only')
+        }
+        return lifecycle
     }
 
     // s3BucketUri returns the bucket-root URI (s3://bucket) of an s3:// URI, or ''
