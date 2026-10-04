@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`ext.costLimit`: a per-task spend cap** (#100). TTL was the only ceiling on a task,
+  so a fan-out of N tasks had a worst case of N × `ext.ttl` × the instance rate with no
+  second belt. `spored` enforces TTL and cost **independently** — first limit to fire
+  wins — so this is a genuine second limit, not a refinement of the first.
+  The failure it actually catches is a task that **hangs** rather than fails: it produces
+  no exit status for Nextflow to retry or abort on, so it bills until the TTL expires.
+
+  ```groovy
+  process ALIGN {
+      ext.ttl = '2h'
+      ext.costLimit = '0.50'   // USD; stops the instance at $0.50 even if the TTL hasn't fired
+  }
+  ```
+
+  Emitted only when set and positive, so omitting it leaves spawn's own default behaviour
+  unchanged. A non-numeric value degrades to "bounded by TTL only" with a warning rather
+  than aborting the pipeline — a typo in `nextflow.config` shouldn't kill a run that is
+  otherwise fine. (`--cost-limit` became a compute **+ storage** total in spawn 0.116.0,
+  so a cap now bounds EBS too.)
+
 ## [0.10.1] - 2026-09-05
 
 ### Fixed
