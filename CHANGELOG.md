@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-04
+
 ### Added
 - **`ext.costLimit`: a per-task spend cap** (#100). TTL was the only ceiling on a task,
   so a fan-out of N tasks had a worst case of N × `ext.ttl` × the instance rate with no
