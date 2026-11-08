@@ -8,7 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
 ### Fixed
+
 - **Stage-out no longer re-uploads the shared reference database into every task's work
   dir (#99).** A `path` input that stage-in symlinked to an `ext.volumes` / `ext.fsx` /
   `ext.efs` mount (#55/#67), or to a local path (#51), was followed by the output
@@ -16,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read: 6.51 TB of a 12 TB work dir in one measured fan-out. The output sync now
   excludes exactly those stage names. Other symlinks are still followed, so a process
   that emits a symlinked output keeps it.
+- **Pooled workers can now reach the run's S3 work dir and its container images
+  (#106).** `spawn pool create` was given only sizing flags, so the workers' IAM role
+  covered spawn's results bucket and nothing else. Pooled tasks couldn't stage from or to
+  the work dir, and a private-ECR image got no pull grant. nf-spawn now passes the work
+  dir bucket as `--s3-write`, and every literal `container` in the `process { }` config as
+  `--container`. New optional `spawn.pool.s3Read` / `s3Write` / `containers` settings
+  cover input buckets and images declared inside modules. `--container` needs
+  spawn ≥ v0.136.0 and is only passed when an image is known.
 
 ## [0.11.0] - 2026-10-04
 

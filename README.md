@@ -147,6 +147,10 @@ spawn {
         spot         = false
         idleTimeout  = '5m'          // a worker drains itself after this long idle
         ttl          = '4h'          // per-worker TTL backstop
+        // What the workers' IAM role may reach. Optional: the S3 work dir is always granted.
+        s3Read       = ['my-inputs-bucket']           // extra input buckets (read-only)
+        s3Write      = ['my-results-bucket']          // extra output buckets
+        containers   = ['<acct>.dkr.ecr.<region>.amazonaws.com/tool:1.0']  // images declared in modules
     }
 }
 ```
@@ -158,9 +162,14 @@ spawn {
 - **Homogeneous:** all workers share `instanceType`, so per-process
   `ext.instanceType` is **not** honored in pool mode — use it for a run whose wide
   scatter is uniform (turn it off, or run per-task mode, for heterogeneous sizing).
-  *other* buckets, grant them at pool creation via `spawn pool create --s3-read
-  <bucket>` / `--s3-write <bucket>` (repeatable) so the worker IAM profile can
-  reach them.
+- **Worker access is fixed at pool creation (#106):** the workers' IAM role is
+  created before any task exists, so nf-spawn passes it to `spawn pool create`. The
+  S3 work dir bucket is always granted (read + write). Inputs in *other* buckets need
+  `s3Read` (or `s3Write`). Every literal `container` in the `process { }` config
+  (top level and `withName:`/`withLabel:` selectors) is passed as `--container`, so a
+  private-ECR image gets the ECR pull grant. An image declared *inside a module*, or
+  set with a closure, isn't visible at run start, so list it in `containers`.
+  `--container` needs spawn ≥ v0.136.0.
 - **Resilient workers:** each worker runs its pull-loop under a restart-on-error
   supervisor — a transient failure re-execs rather than stranding an idle
   instance, while a clean idle-drain still terminates it (scale-to-zero).
