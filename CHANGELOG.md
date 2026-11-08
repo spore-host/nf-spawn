@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Stage-out no longer re-uploads the shared reference database into every task's work
+  dir (#99).** A `path` input that stage-in symlinked to an `ext.volumes` / `ext.fsx` /
+  `ext.efs` mount (#55/#67), or to a local path (#51), was followed by the output
+  `aws s3 sync`, so a 0.48 MB Kraken2 report cost a 16.4 GB upload of the database it
+  read: 6.51 TB of a 12 TB work dir in one measured fan-out. The output sync now
+  excludes exactly those stage names. Other symlinks are still followed, so a process
+  that emits a symlinked output keeps it.
+
 ## [0.11.0] - 2026-10-04
 
 ### Added

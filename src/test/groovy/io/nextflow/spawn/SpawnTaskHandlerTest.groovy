@@ -928,4 +928,69 @@ class SpawnTaskHandlerTest extends Specification {
         spec.lifecycle.ttl == '2h'
         spec.lifecycle.on_complete == 'terminate'
     }
+
+    // --- #99: stage-out must not republish what stage-in symlinked ---
+
+    private static String outputSyncLine(String script) {
+        script.readLines().find { it.contains('aws s3 sync "${LOCAL_DIR}/" "${WORKDIR_S3}"') }
+    }
+
+    def 'stage-out excludes a stage name that stage-in symlinked to a shared-FS mount (#99)'() {
+        given: 'taxprofiler stages db_path; stage-in symlinks kraken2 -> /fsx/kraken2 (#55/#67)'
+        def inputs = [
+            'reads_1.fq.gz': s3Path('s3://data/sra/SRR_1.fq.gz'),
+            'kraken2'      : s3Path('s3://bucket/work/stage-abc/70/x/kraken2/'),
+        ] as Map<String, java.nio.file.Path>
+        def mounts = SpawnTaskHandler.sharedFsMountPaths([[id: 'fs-0abc', mount: '/fsx', paths: ['kraken2']]])
+
+        when:
+        def script = SpawnTaskHandler.buildStagingScript('s3://b/work/aa/bb', 'us-east-1', 'kraken2 ...', 'img:1', inputs, '', '', mounts, false)
+        def sync = outputSyncLine(script)
+
+        then: 'stage-in symlinked it (the precondition this fix depends on)'
+        script.contains("ln -sfn '/fsx/kraken2' \"\${LOCAL_DIR}/\"'kraken2'")
+
+        and: 'the output sync excludes the link AND everything aws s3 sync would walk under it'
+        sync.contains("--exclude 'kraken2' --exclude 'kraken2/*'")
+
+        and: 'ordinary copied inputs and real outputs are not excluded'
+        !sync.contains('reads_1')
+        sync.contains('--exclude ".exitcode"')
+
+        and: 'symlinks are still followed in general (a task-emitted symlinked output keeps working)'
+        !sync.contains('--no-follow-symlinks')
+    }
+
+    def 'stage-out excludes an ext.volumes basename match and a local-path input link (#99)'() {
+        given:
+        def inputs = [
+            'metaphlan'   : s3Path('s3://bucket/work/stage/metaphlan/'),
+            'db/k2'       : s3Path('file:///opt/databases/k2'),
+            'out_seed.txt': s3Path('s3://bucket/work/up/out_seed.txt'),
+        ] as Map<String, java.nio.file.Path>
+
+        when:
+        def sync = outputSyncLine(SpawnTaskHandler.buildStagingScript(
+            's3://b/work/aa/bb', 'us-east-1', 'run', 'img:1', inputs, '', '', ['/opt/databases/metaphlan']))
+
+        then:
+        sync.contains("--exclude 'metaphlan' --exclude 'metaphlan/*'")
+        sync.contains("--exclude 'db/k2' --exclude 'db/k2/*'")
+        !sync.contains('out_seed')
+    }
+
+    def 'stage-out sync line is unchanged when nothing was symlinked (#99)'() {
+        when:
+        def sync = outputSyncLine(SpawnTaskHandler.buildStagingScript('s3://b/w', 'us-east-1', 'x', ''))
+
+        then:
+        sync == 'if ! aws s3 sync "${LOCAL_DIR}/" "${WORKDIR_S3}" --region "${AWS_REGION}" --exclude ".exitcode" --quiet; then'
+    }
+
+    def 'stageOutExcludes escapes glob metacharacters and trailing slashes (#99)'() {
+        expect:
+        SpawnTaskHandler.stageOutExcludes(['db[1]*?/']) == " --exclude 'db[[]1][*][?]' --exclude 'db[[]1][*][?]/*'"
+        SpawnTaskHandler.stageOutExcludes([]) == ''
+        SpawnTaskHandler.stageOutExcludes(null) == ''
+    }
 }

@@ -1004,7 +1004,14 @@ class SpawnTaskHandler extends TaskHandler {
         //    successful with MISSING outputs — a silent partial success (#59).
         //    So if the sync fails and the task itself succeeded, record a
         //    non-zero exit code instead, surfacing it as a task failure.
-        sb << 'if ! aws s3 sync "${LOCAL_DIR}/" "${WORKDIR_S3}" --region "${AWS_REGION}" --exclude ".exitcode" --quiet; then\n'
+        //    The sync EXCLUDES every input that stage-in symlinked to a mount or a
+        //    local path (#99). `aws s3 sync` follows symlinks, so without this the
+        //    #55/#67 zero-copy reference DB (e.g. kraken2/ -> /fsx/kraken2) was
+        //    uploaded into every task's work dir as if the task had produced it.
+        //    Only those stage names are excluded: a symlink the TASK creates is
+        //    still followed, so a pipeline that emits a symlinked output keeps it.
+        sb << 'if ! aws s3 sync "${LOCAL_DIR}/" "${WORKDIR_S3}" --region "${AWS_REGION}" --exclude ".exitcode"' +
+              stageOutExcludes(symlinkedStageNames(inputs, mountPaths)) + ' --quiet; then\n'
         sb << '  echo "nf-spawn: output sync to ${WORKDIR_S3} failed" >&2\n'
         sb << '  if [ "${TASK_RC}" -eq 0 ]; then TASK_RC=75; fi\n'
         sb << 'fi\n'
@@ -1046,11 +1053,7 @@ class SpawnTaskHandler extends TaskHandler {
     static String buildInputStaging(Map<String, Path> inputs, List<String> mountPaths = []) {
         if (!inputs) return ''
         // Index ext.volumes mounts by basename, for the #55 short-circuit below.
-        Map<String, String> mountByBase = [:]
-        for (String mp : (mountPaths ?: [])) {
-            String b = baseName(mp)
-            if (b) mountByBase[b] = mp
-        }
+        Map<String, String> mountByBase = mountsByBaseName(mountPaths)
         StringBuilder sb = new StringBuilder()
         sb << '# Localize declared inputs by source URI (#37 — they live outside this work dir).\n'
         inputs.each { String stageName, Path source ->
@@ -1137,6 +1140,59 @@ class SpawnTaskHandler extends TaskHandler {
             sb << "aws s3 cp ${shellQuote(uri)} \"\${LOCAL_DIR}/\"${shellQuote(stageName)} --region \"\${AWS_REGION}\"${recursive} --quiet || { echo \"nf-spawn: failed to stage input ${stageName} from ${uri}\" >&2; exit 1; }\n"
         }
         sb << '\n'
+        return sb.toString()
+    }
+
+    // mountsByBaseName indexes mount paths by basename, the key the #55
+    // stage-name short-circuit matches on.
+    private static Map<String, String> mountsByBaseName(List<String> mountPaths) {
+        Map<String, String> mountByBase = [:]
+        for (String mp : (mountPaths ?: [])) {
+            String b = baseName(mp)
+            if (b) mountByBase[b] = mp
+        }
+        return mountByBase
+    }
+
+    // symlinkedStageNames returns the stage names buildInputStaging links rather
+    // than copies (#99): a stage name whose basename matches a mount (#55/#67), or
+    // an input whose source is a local absolute path (#51). These are references,
+    // not task outputs, so stage-out must not upload what they point at. The
+    // conditions mirror buildInputStaging's two `ln -sfn` branches exactly.
+    @groovy.transform.PackageScope
+    static List<String> symlinkedStageNames(Map<String, Path> inputs, List<String> mountPaths = []) {
+        if (!inputs) return []
+        Map<String, String> mountByBase = mountsByBaseName(mountPaths)
+        List<String> names = []
+        inputs.each { String stageName, Path source ->
+            if (mountByBase[baseName(stageName)]) {
+                names << stageName
+                return
+            }
+            final uri = normalizeS3Uri(source.toUri().toString())
+            if (!uri.startsWith('s3://') && localAbsolutePath(uri)) {
+                names << stageName
+            }
+        }
+        return names
+    }
+
+    // stageOutExcludes renders `--exclude` flags for the output sync (#99): the
+    // name itself (a symlinked file) and everything under it (a symlinked
+    // directory, which `aws s3 sync` walks into). AWS CLI filters are fnmatch
+    // globs, so `*`, `?` and `[` in a stage name are bracket-escaped to match
+    // literally. Returns '' (leading space otherwise) so no exclusions leaves the
+    // sync line unchanged.
+    @groovy.transform.PackageScope
+    static String stageOutExcludes(List<String> stageNames) {
+        StringBuilder sb = new StringBuilder()
+        for (String name : (stageNames ?: [])) {
+            String n = name?.replaceAll('/+$', '')
+            if (!n) continue
+            String glob = n.replaceAll(/([*?\[])/, '[$1]')
+            sb << ' --exclude ' << shellQuote(glob)
+            sb << ' --exclude ' << shellQuote(glob + '/*')
+        }
         return sb.toString()
     }
 
