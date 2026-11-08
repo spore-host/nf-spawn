@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cover input buckets and images declared inside modules. `--container` needs
   spawn ≥ v0.136.0 and is only passed when an image is known.
 
+- **Changing a process's `container` now invalidates `-resume` (#107).** Nextflow adds
+  the container image to the task hash only when a container engine is enabled or the
+  executor is container-native. nf-spawn runs its own `docker run` and reported neither,
+  so after a repin `-resume` quietly returned outputs the *old* image produced. The
+  `spawn` executor now declares itself container-native, as the AWS Batch, Google Batch
+  and Kubernetes executors do, so the image is hashed exactly as Nextflow hashes it
+  there. **Upgrade note:** the first `-resume` after upgrading re-runs every task that has
+  a `container`, once, because its hash now includes the image. Tasks without a
+  container keep their cache.
+
 ## [0.11.0] - 2026-10-04
 
 ### Added

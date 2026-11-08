@@ -39,6 +39,18 @@ class SpawnExecutor extends Executor implements ExtensionPoint {
         return TaskPollingMonitor.create(session, config, name, 100, Duration.of('5 sec'))
     }
 
+    // Container-native: nf-spawn runs the task's container itself (its own
+    // `docker run` in the staging script), so it needs no `docker { enabled }`
+    // block, which is what AWS Batch, Google Batch and K8s report too.
+    //
+    // This is also what puts the image into the task hash (#107). Nextflow's
+    // TaskHasher adds task.getContainerFingerprint() only when
+    // task.isContainerEnabled(), and that is false unless a container engine is
+    // enabled or the executor is container-native. Returning false meant a
+    // repinned image was invisible to -resume, which returned the old image's
+    // cached outputs. The flag's other consumer, BashWrapperBuilder (whether to
+    // wrap the command in a container), is never used by nf-spawn, which builds
+    // its own run line.
     @Override
-    boolean isContainerNative() { return false }
+    boolean isContainerNative() { return true }
 }
