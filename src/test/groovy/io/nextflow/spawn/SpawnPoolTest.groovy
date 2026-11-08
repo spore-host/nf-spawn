@@ -154,4 +154,73 @@ class SpawnPoolTest extends Specification {
         observers.size() == 1
         observers[0] instanceof SpawnPoolObserver
     }
+
+    // --- #106: pool create must pass what the workers' role has to reach ---
+
+    private Session sessionWithConfig(Map cfg, UUID uid) {
+        Session s = Stub(Session)
+        s.getConfig() >> cfg
+        s.getUniqueId() >> uid
+        return s
+    }
+
+    private static List<String> valuesOf(List<String> cmd, String flag) {
+        (0..<cmd.size()).findAll { cmd[it] == flag }.collect { cmd[it + 1] }
+    }
+
+    def 'buildCreateCommand grants the S3 work dir bucket and declared buckets/images (#106)'() {
+        given:
+        def s = sessionWithConfig([
+            workDir: 's3://work-bkt/runs/a',
+            process: [
+                container          : 'quay.io/biocontainers/fastp:0.23.4',
+                'withName:CLASSIFY': [container: '123456789012.dkr.ecr.us-east-1.amazonaws.com/kraken2:2.1'],
+                'withLabel:big'    : [container: { 'dynamic' }],   // closure: resolved per task, skipped
+            ],
+            spawn  : [pool: [
+                enabled: true, workers: 4, instanceType: 'c7i.large',
+                containers: ['123456789012.dkr.ecr.us-east-1.amazonaws.com/module-img:1'],
+                s3Read    : 'inputs-bkt, work-bkt',
+                s3Write   : ['results-bkt/out'],
+            ]],
+        ], UUID.randomUUID())
+
+        when:
+        def cmd = SpawnPoolObserver.buildCreateCommand(SpawnPoolConfig.fromSession(s), 'us-east-1')
+
+        then: 'the work dir bucket is a write grant (tasks stage from and to it), plus declared write buckets'
+        valuesOf(cmd, '--s3-write') == ['s3://work-bkt', 's3://results-bkt']
+
+        and: 'declared read buckets, minus any already granted write'
+        valuesOf(cmd, '--s3-read') == ['s3://inputs-bkt']
+
+        and: 'every literal config container plus the declared ones, so spawn can add the ECR pull grant'
+        valuesOf(cmd, '--container') == [
+            'quay.io/biocontainers/fastp:0.23.4',
+            '123456789012.dkr.ecr.us-east-1.amazonaws.com/kraken2:2.1',
+            '123456789012.dkr.ecr.us-east-1.amazonaws.com/module-img:1',
+        ]
+    }
+
+    def 'buildCreateCommand emits no --container when no image is known (#106)'() {
+        given: 'spawn < 0.136.0 has no --container, so it must not appear needlessly'
+        def s = sessionWithConfig([workDir: 's3:///work-bkt/w',
+                                   spawn: [pool: [enabled: true, workers: 1, instanceType: 't3.medium']]],
+                                  UUID.randomUUID())
+
+        when:
+        def cmd = SpawnPoolObserver.buildCreateCommand(SpawnPoolConfig.fromSession(s), 'us-east-1')
+
+        then: 'the malformed s3:/// form is normalized (#41)'
+        valuesOf(cmd, '--s3-write') == ['s3://work-bkt']
+        !cmd.contains('--container')
+        !cmd.contains('--s3-read')
+    }
+
+    def 'stringList accepts a list or a delimited string (#106)'() {
+        expect:
+        SpawnPoolConfig.stringList(null) == []
+        SpawnPoolConfig.stringList('a, b  c') == ['a', 'b', 'c']
+        SpawnPoolConfig.stringList(['a', ' ', 'b']) == ['a', 'b']
+    }
 }

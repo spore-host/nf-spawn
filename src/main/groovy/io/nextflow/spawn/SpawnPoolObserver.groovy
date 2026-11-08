@@ -88,6 +88,19 @@ class SpawnPoolObserver implements TraceObserverV2 {
         if (pc.spot) {
             cmd << '--spot'
         }
+        // What the workers' role may reach (#106). Without these the role covered
+        // only spawn's results bucket, so pooled tasks could not stage the S3 work
+        // dir and a private-ECR image got no pull grant. --container needs
+        // spawn >= 0.136.0, so it is emitted only when there is an image.
+        for (String b : pc.s3Write) {
+            cmd << '--s3-write' << b
+        }
+        for (String b : pc.s3Read) {
+            cmd << '--s3-read' << b
+        }
+        for (String c : pc.containers) {
+            cmd << '--container' << c
+        }
         return cmd
     }
 
